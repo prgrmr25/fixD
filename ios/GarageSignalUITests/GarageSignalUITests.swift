@@ -88,11 +88,15 @@ final class GarageSignalUITests: XCTestCase {
         let connect = app.buttons["connect-vehicle"]
         XCTAssertTrue(connect.waitForExistence(timeout: 8))
         XCTAssertFalse(app.staticTexts["Simulated telemetry"].exists)
+        connect.tap()
+        XCTAssertTrue(app.navigationBars["Bluetooth Inspector"].waitForExistence(timeout: 8))
+        app.tabBars.buttons["Dashboard"].tap()
         app.buttons["Demo"].tap()
         XCTAssertTrue(app.staticTexts["Simulated telemetry"].waitForExistence(timeout: 5))
         XCTAssertFalse(connect.exists)
 
         app.tabBars.buttons["Signals"].tap()
+        XCTAssertTrue(app.navigationBars["Signals"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["Simulated telemetry"].waitForExistence(timeout: 5))
         app.buttons["Vehicle"].tap()
         XCTAssertTrue(app.staticTexts["Vehicle monitoring inactive"].waitForExistence(timeout: 5))

@@ -15,7 +15,7 @@ struct GarageSignalApp: App {
     @StateObject private var logs = DriveLogStore()
     @StateObject private var bridge = BluetoothBridge()
     @State private var selectedTab: AppTab = .dashboard
-    @State private var showAdapter = false
+    @State private var diagnosticsPath: [DiagnosticRoute] = []
 
     var body: some Scene {
         WindowGroup {
@@ -37,10 +37,17 @@ struct GarageSignalApp: App {
                 .tabItem { Label("Signals", systemImage: "list.bullet") }
                 .tag(AppTab.signals)
 
-                NavigationStack {
-                    DiagnosticsView(bridge: bridge)
-                        .navigationDestination(isPresented: $showAdapter) {
-                            AdapterInspectorView(bridge: bridge)
+                NavigationStack(path: $diagnosticsPath) {
+                    DiagnosticsView()
+                        .navigationDestination(for: DiagnosticRoute.self) { route in
+                            switch route {
+                            case .adapter:
+                                AdapterInspectorView(bridge: bridge)
+                            case .modules:
+                                ModuleCatalogView(vehicle: bridge.vehicle)
+                            case .serviceFunctions:
+                                ServiceFunctionsView()
+                            }
                         }
                 }
                 .tabItem { Label("Diagnostics", systemImage: "stethoscope") }
@@ -76,6 +83,6 @@ struct GarageSignalApp: App {
 
     private func openAdapter() {
         selectedTab = .diagnostics
-        showAdapter = true
+        diagnosticsPath = [.adapter]
     }
 }
