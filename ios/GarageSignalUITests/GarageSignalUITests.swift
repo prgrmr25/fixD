@@ -48,6 +48,18 @@ final class GarageSignalUITests: XCTestCase {
     }
 
     @MainActor
+    func testLiveScanRequiresAnIdentifiedAdapter() {
+        let app = XCUIApplication()
+        app.launch()
+
+        app.tabBars.buttons["Diagnostics"].tap()
+        app.buttons["Scan a vehicle with FIXD"].tap()
+        XCTAssertTrue(app.navigationBars["Bluetooth Inspector"].waitForExistence(timeout: 8))
+        XCTAssertTrue(app.buttons["Scan Nearby"].exists)
+        XCTAssertFalse(app.buttons["Scan Vehicle"].exists)
+    }
+
+    @MainActor
     func testDemoRecordingPersistsAndCanBeExported() {
         let app = XCUIApplication()
         app.launch()

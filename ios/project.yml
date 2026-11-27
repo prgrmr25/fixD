@@ -7,12 +7,17 @@ settings:
     SWIFT_VERSION: "5.0"
     CURRENT_PROJECT_VERSION: 1
     MARKETING_VERSION: "0.1.0"
+packages:
+  DiagnosticsCore:
+    path: DiagnosticsCore
 targets:
   GarageSignal:
     type: application
     platform: iOS
     sources:
       - GarageSignal
+    dependencies:
+      - package: DiagnosticsCore
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.ayub.garagesignalobd
@@ -20,7 +25,7 @@ targets:
         GENERATE_INFOPLIST_FILE: YES
         INFOPLIST_KEY_CFBundleDisplayName: Garage Signal OBD
         INFOPLIST_KEY_ITSAppUsesNonExemptEncryption: NO
-        INFOPLIST_KEY_NSBluetoothAlwaysUsageDescription: Garage Signal uses Bluetooth to discover and inspect your diagnostic adapter.
+        INFOPLIST_KEY_NSBluetoothAlwaysUsageDescription: Garage Signal uses Bluetooth to discover your diagnostic adapter and read vehicle data when you start a scan.
         INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
         INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone: UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight

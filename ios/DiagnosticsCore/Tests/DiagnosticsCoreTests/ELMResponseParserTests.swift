@@ -1,0 +1,133 @@
+import XCTest
+@testable import DiagnosticsCore
+
+final class ELMResponseParserTests: XCTestCase {
+    func testDiagnosticRequestEncoderSupportsOnlyReadServices() {
+        let requests: [(DiagnosticRequest, String)] = [
+            (.currentData(.engineSpeed), "010C\r"),
+            (.troubleCodes(.stored), "03\r"),
+            (.troubleCodes(.pending), "07\r"),
+            (.troubleCodes(.permanent), "0A\r")
+        ]
+        XCTAssertEqual(TroubleCodeCategory.allCases.map(\.rawValue), [0x03, 0x07, 0x0A])
+        for (request, expected) in requests {
+            XCTAssertEqual(ASCIIPromptFramer.encode(request), Array(expected.utf8))
+        }
+    }
+
+    func testPublishedHeaderAndPaddingExample() throws {
+        // Elm Electronics ELM327DSH, "Setting the Headers", p. 39.
+        let replies = try ELMResponseParser.parse(
+            "01 00\rSEARCHING...\r7E8 06 41 00 BE 3F B8 13 00\r>",
+            for: .currentData(.supported01Through20)
+        )
+        XCTAssertEqual(replies.count, 1)
+        XCTAssertEqual(replies.first?.responder.hexIdentifier, "7E8")
+        XCTAssertEqual(replies.first?.responder.width, .standard11Bit)
+        XCTAssertEqual(replies.first?.payload, [0x41, 0x00, 0xBE, 0x3F, 0xB8, 0x13])
+        XCTAssertEqual(
+            replies.first?.outcome,
+            .currentData(.supportedPIDs([1, 3, 4, 5, 6, 7, 11, 12, 13, 14, 15, 16, 17, 19, 20, 21, 28, 31, 32]))
+        )
+    }
+
+    func testCurrentDataKeepsEachResponderAndSupportsExtendedHeadersAndDLC() throws {
+        let replies = try ELMResponseParser.parse(
+            "18 DA F1 10 5 04 41 0C 1A F8\r\n18daf11804410c1c20\r\n",
+            for: .currentData(.engineSpeed)
+        )
+        XCTAssertEqual(replies.map(\.responder.hexIdentifier), ["18DAF110", "18DAF118"])
+        XCTAssertEqual(replies.map(\.responder.identifier), [0x18DAF110, 0x18DAF118])
+        XCTAssertEqual(replies.map(\.responder.width), [.extended29Bit, .extended29Bit])
+        XCTAssertEqual(replies.map(\.outcome), [.currentData(.measurement(1726, .rpm)), .currentData(.measurement(1800, .rpm))])
+    }
+
+    func testEachDTCServiceAndEmptyPositiveList() throws {
+        let replies = try ELMResponseParser.parse(
+            "03\r7E8 06 43 02 01 33 D0 16 AA\r7E9 02 43 00\r",
+            for: .troubleCodes(.stored)
+        )
+        XCTAssertEqual(replies.map(\.outcome), [.troubleCodes(["P0133", "U1016"]), .troubleCodes([])])
+        XCTAssertEqual(try ELMResponseParser.parse("7e80447014006", for: .troubleCodes(.pending)).first?.outcome,
+                       .troubleCodes(["C0006"]))
+        XCTAssertEqual(try ELMResponseParser.parse("7E8 04 4A 01 80 0A", for: .troubleCodes(.permanent)).first?.outcome,
+                       .troubleCodes(["B000A"]))
+    }
+
+    func testIndependentInterleavedISOTransportResponses() throws {
+        let text = """
+        7E8 10 0A 43 04 01 33 D0 16
+        7E9 10 08 43 03 40 06 80 0A
+        7E9 21 C0 99
+        7E8 21 03 00 20 2A CC CC CC
+        """
+        let replies = try ELMResponseParser.parse(text, for: .troubleCodes(.stored))
+        XCTAssertEqual(replies.map(\.responder.hexIdentifier), ["7E8", "7E9"])
+        XCTAssertEqual(replies.map(\.outcome), [
+            .troubleCodes(["P0133", "U1016", "P0300", "P202A"]),
+            .troubleCodes(["C0006", "B000A", "U0099"])
+        ])
+    }
+
+    func testISOTransportSequenceRollsOverAfterFifteen() throws {
+        let payload: [UInt8] = [0x43, 60] + (1...60).flatMap { [0, UInt8($0)] }
+        func line(_ frame: [UInt8]) -> String {
+            "7E8 " + frame.map { String(format: "%02X", Int($0)) }.joined(separator: " ")
+        }
+        var lines = [line([0x10, UInt8(payload.count)] + Array(payload.prefix(6)))]
+        for (index, offset) in stride(from: 6, to: payload.count, by: 7).enumerated() {
+            let control = UInt8(0x20 | ((index + 1) & 0x0F))
+            lines.append(line([control] + Array(payload.dropFirst(offset).prefix(7))))
+        }
+        let result = try ELMResponseParser.parse(lines.joined(separator: "\r"), for: .troubleCodes(.stored))
+        XCTAssertEqual(result.first?.payload, payload)
+        XCTAssertEqual(result.first?.outcome, .troubleCodes((1...60).map { String(format: "P%04X", $0) }))
+    }
+
+    func testNegativeResponsePreservesECUAndPendingCanPrecedeSuccess() throws {
+        let reply = "7E8 03 7F 01 78\r7E9 03 7F 01 12\r7E8 04 41 0C 1A F8\r"
+        let replies = try ELMResponseParser.parse(reply, for: .currentData(.engineSpeed))
+        XCTAssertEqual(replies.map(\.responder.hexIdentifier), ["7E8", "7E9"])
+        XCTAssertEqual(replies.map(\.outcome), [.currentData(.measurement(1726, .rpm)), .negativeResponse(code: 0x12)])
+        let dtcResponse = try ELMResponseParser.parse("7E8 03 7F 0A 11", for: .troubleCodes(.permanent))
+        XCTAssertEqual(dtcResponse.first?.outcome, .negativeResponse(code: 0x11))
+    }
+
+    func testRejectsAdapterStatusAndAmbiguousFrames() throws {
+        let cases: [(String, ELMResponseError)] = [
+            ("NO DATA\r>", .noData),
+            ("010C\rSEARCHING...\r>", .emptyResponse),
+            ("CAN ERROR\r>", .adapterStatus("CAN ERROR")),
+            ("7E8 04 41 0C 1A F8\rNO DATA", .adapterStatus("NO DATA alongside CAN frames")),
+            ("010C>>", .malformedReply),
+            ("41 0C 1A F8\r>", .invalidFrame(line: 1)),
+            ("7DF 04 41 0C 1A F8\r>", .invalidFrame(line: 1)),
+            ("7E8 4 04 41 0C 1A F8\r>", .invalidFrame(line: 1)),
+            ("7E8 04 41 0C +A F8\r>", .invalidFrame(line: 1))
+        ]
+        for (line, expected) in cases {
+            XCTAssertThrowsError(try ELMResponseParser.parse(line, for: .currentData(.engineSpeed))) {
+                XCTAssertEqual($0 as? ELMResponseError, expected, line)
+            }
+        }
+    }
+
+    func testRejectsWrongServiceAndIncompleteOrConflictingReplies() throws {
+        let responder = CANResponder(identifier: 0x7E8, width: .standard11Bit)
+        let cases: [(String, DiagnosticRequest, ELMResponseError)] = [
+            ("7E8 03 7F 22 31", .troubleCodes(.stored), .unexpectedResponse(responder: responder)),
+            ("7E8 02 43 03", .troubleCodes(.stored), .invalidTroubleCodes(responder: responder)),
+            ("7E8 04 43 01 00 00", .troubleCodes(.stored), .invalidTroubleCodes(responder: responder)),
+            ("7E8 10 0A 43 04 01 33 D0 16", .troubleCodes(.stored), .incompleteTransport(responder: responder)),
+            ("7E8 10 0A 43 04 01 33 D0 16\r7E8 22 03 00 20 2A", .troubleCodes(.stored), .invalidTransport(responder: responder, line: 2)),
+            ("7E8 07 41 0C 1A F8", .currentData(.engineSpeed), .invalidTransport(responder: responder, line: 1)),
+            ("7E8 04 41 0D 1A F8", .currentData(.engineSpeed), .currentData(responder: responder, reason: .mismatchedPID(expected: 0x0C, received: 0x0D))),
+            ("7E8 04 41 0C 1A F8\r7E8 04 41 0C 1C 20", .currentData(.engineSpeed), .conflictingResponses(responder: responder))
+        ]
+        for (line, request, expected) in cases {
+            XCTAssertThrowsError(try ELMResponseParser.parse(line, for: request)) {
+                XCTAssertEqual($0 as? ELMResponseError, expected, line)
+            }
+        }
+    }
+}

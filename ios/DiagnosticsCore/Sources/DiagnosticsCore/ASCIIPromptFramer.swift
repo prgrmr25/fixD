@@ -12,7 +12,11 @@ public struct ASCIIPromptFramer: Sendable {
     public init() {}
 
     public static func encode(_ pid: CurrentDataPID) -> [UInt8] {
-        let command = pid.requestPayload.map { byte in
+        encode(.currentData(pid))
+    }
+
+    public static func encode(_ request: DiagnosticRequest) -> [UInt8] {
+        let command = request.requestPayload.map { byte in
             let hex = String(byte, radix: 16, uppercase: true)
             return byte < 16 ? "0" + hex : hex
         }.joined()

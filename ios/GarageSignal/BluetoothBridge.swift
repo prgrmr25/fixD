@@ -5,13 +5,14 @@ import SwiftUI
 @MainActor
 struct AdapterInspectorView: View {
     @StateObject private var bridge = BluetoothBridge()
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
         List {
             Section {
-                Label("GATT discovery only", systemImage: "antenna.radiowaves.left.and.right")
+                Label("Bluetooth diagnosis", systemImage: "antenna.radiowaves.left.and.right")
                     .font(.headline)
-                Text("Discover the Bluetooth services and characteristic properties of an adapter you select. Discovery sends no diagnostic commands.")
+                Text("Select your FIXD or FIXD2 to inspect its Bluetooth connection and start a read-only vehicle scan.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                 Text(bridge.status)
@@ -55,6 +56,29 @@ struct AdapterInspectorView: View {
                         .disabled(bridge.hasActiveConnection || !device.isConnectable)
                     }
                 }
+            }
+
+            if bridge.report != nil {
+                Section("Read-Only Vehicle Scan") {
+                    if let scanStatus = bridge.liveScanStatus {
+                        Text(scanStatus)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                    if bridge.isLiveScanRunning {
+                        ProgressView()
+                            .accessibilityLabel("Reading vehicle diagnostics")
+                    } else if bridge.canStartLiveScan {
+                        Button("Scan Vehicle", systemImage: "stethoscope", action: bridge.startLiveScan)
+                        Text("With the vehicle parked and ignition on, start a standard OBD-II scan. No codes or learned values are cleared.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+
+            if let snapshot = bridge.liveScanResult {
+                FIXDScanResultView(snapshot: snapshot)
             }
 
             if let report = bridge.report {
@@ -118,6 +142,11 @@ struct AdapterInspectorView: View {
         .navigationTitle("Bluetooth Inspector")
         .navigationBarTitleDisplayMode(.inline)
         .onDisappear(perform: bridge.close)
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .background {
+                bridge.close()
+            }
+        }
     }
 }
 
@@ -198,12 +227,25 @@ private struct APKProfile: Identifiable {
         else { return false }
 
         let receives = characteristics.contains {
-            Self.shortID($0.uuid) == receive && $0.flags.contains(.notify)
+            Self.shortID($0.uuid) == receive && !$0.flags.intersection([.notify, .indicate]).isEmpty
         }
         let transmits = characteristics.contains {
             Self.shortID($0.uuid) == transmit && !$0.flags.intersection([.write, .writeWithoutResponse]).isEmpty
         }
         return receives && transmits
+    }
+
+    func liveEndpoints(in gattService: CBService) -> FIXDEndpoints? {
+        guard Self.shortID(gattService.uuid.uuidString) == service,
+              let characteristics = gattService.characteristics else { return nil }
+        let receiveCandidates = characteristics.filter {
+            Self.shortID($0.uuid.uuidString) == receive && !$0.properties.intersection([.notify, .indicate]).isEmpty
+        }
+        let transmitCandidates = characteristics.filter {
+            Self.shortID($0.uuid.uuidString) == transmit && !$0.properties.intersection([.write, .writeWithoutResponse]).isEmpty
+        }
+        guard receiveCandidates.count == 1, transmitCandidates.count == 1 else { return nil }
+        return FIXDEndpoints(receive: receiveCandidates[0], transmit: transmitCandidates[0])
     }
 
     private static func shortID(_ uuid: String) -> String {
@@ -216,6 +258,11 @@ private struct APKProfile: Identifiable {
         }
         return upper
     }
+}
+
+private struct FIXDEndpoints {
+    let receive: CBCharacteristic
+    let transmit: CBCharacteristic
 }
 
 private struct DiscoveryReport {
@@ -264,6 +311,9 @@ private final class BluetoothBridge: NSObject, ObservableObject {
     @Published private(set) var status = "Ready to scan for nearby peripherals."
     @Published private(set) var devices: [NearbyDevice] = []
     @Published private(set) var report: DiscoveryReport?
+    @Published private(set) var liveScanStatus: String?
+    @Published private(set) var liveScanResult: FIXDScanSnapshot?
+    @Published private(set) var isLiveScanRunning = false
     @Published private var phase: Phase = .idle
 
     private var central: CBCentralManager?
@@ -272,6 +322,8 @@ private final class BluetoothBridge: NSObject, ObservableObject {
     private var pendingServices: Set<ObjectIdentifier> = []
     private var deadline: Task<Void, Never>?
     private var disconnectMessage = "Disconnected."
+    private var liveSession: FIXDLiveSession?
+    private var liveScanTask: Task<Void, Never>?
 
     var isStartingScan: Bool { phase == .startingScan }
     var isScanning: Bool { phase == .scanning }
@@ -280,11 +332,74 @@ private final class BluetoothBridge: NSObject, ObservableObject {
         phase == .connecting || phase == .discovering || phase == .ready || phase == .disconnecting
     }
 
+    var canStartLiveScan: Bool {
+        phase == .ready && !isLiveScanRunning && candidateEndpoints != nil
+    }
+
+    private var candidateEndpoints: FIXDEndpoints? {
+        guard let selected, selected.state == .connected,
+              let name = report?.name.trimmingCharacters(in: .whitespacesAndNewlines).uppercased(),
+              ["FIXD", "FIXD2"].contains(name) else { return nil }
+        let endpoints = (selected.services ?? []).flatMap { service in
+            APKProfile.observed.compactMap { $0.liveEndpoints(in: service) }
+        }
+        guard endpoints.count == 1 else { return nil }
+        return endpoints[0]
+    }
+
+    func startLiveScan() {
+        guard canStartLiveScan, let selected, let endpoints = candidateEndpoints else { return }
+        let session: FIXDLiveSession
+        do {
+            session = try FIXDLiveSession(peripheral: selected, receive: endpoints.receive, transmit: endpoints.transmit)
+        } catch {
+            liveScanStatus = error.localizedDescription
+            return
+        }
+        liveScanResult = nil
+        liveSession = session
+        isLiveScanRunning = true
+        liveScanTask = Task { @MainActor [weak self] in
+            do {
+                let result = try await FIXDReadScan.run(using: session) { message in
+                    self?.liveScanStatus = message
+                }
+                guard let self, self.liveSession === session, !Task.isCancelled else { return }
+                self.liveScanResult = result
+                self.finishLiveScan("Read-only scan complete.")
+            } catch {
+                guard let self, self.liveSession === session, !Task.isCancelled else { return }
+                self.finishLiveScan("Live scan stopped. " + error.localizedDescription)
+            }
+        }
+    }
+
+    private func finishLiveScan(_ message: String) {
+        liveScanTask = nil
+        liveSession?.invalidate()
+        liveSession = nil
+        isLiveScanRunning = false
+        liveScanStatus = message
+        disconnect(because: "Disconnected after the read-only scan.")
+    }
+
+    private func stopLiveScan() {
+        guard let liveSession else { return }
+        liveScanTask?.cancel()
+        liveScanTask = nil
+        self.liveSession = nil
+        isLiveScanRunning = false
+        liveScanStatus = "Live scan interrupted. Reconnect to try again."
+        liveSession.invalidate()
+    }
+
     func scan() {
         guard phase == .idle else { return }
         devices.removeAll()
         peripherals.removeAll()
         report = nil
+        liveScanResult = nil
+        liveScanStatus = nil
         phase = .startingScan
         status = "Waiting for Bluetooth…"
         setDeadline { bridge in
@@ -356,6 +471,7 @@ private final class BluetoothBridge: NSObject, ObservableObject {
 
     private func disconnect(because message: String) {
         guard let peripheral = selected, !isDisconnecting else { return }
+        stopLiveScan()
         deadline?.cancel()
         if phase == .connecting || phase == .discovering {
             report?.outcome = message == "Disconnected." ? "Discovery cancelled." : message
@@ -371,6 +487,7 @@ private final class BluetoothBridge: NSObject, ObservableObject {
     }
 
     private func finishConnection(_ message: String) {
+        stopLiveScan()
         deadline?.cancel()
         selected?.delegate = nil
         selected = nil
@@ -394,6 +511,9 @@ private final class BluetoothBridge: NSObject, ObservableObject {
         report?.outcome = result
         phase = .ready
         status = result
+        if candidateEndpoints == nil {
+            liveScanStatus = "Live scanning needs one complete FIXD or FIXD2 Bluetooth profile."
+        }
     }
 
     private func setDeadline(_ action: @escaping @MainActor (BluetoothBridge) -> Void) {
@@ -508,6 +628,31 @@ extension BluetoothBridge: @preconcurrency CBCentralManagerDelegate {
 }
 
 extension BluetoothBridge: @preconcurrency CBPeripheralDelegate {
+    func peripheral(_ peripheral: CBPeripheral, didModifyServices invalidatedServices: [CBService]) {
+        guard selected === peripheral, !invalidatedServices.isEmpty else { return }
+        disconnect(because: "Adapter services changed. Reconnect to scan again.")
+    }
+
+    func peripheral(_ peripheral: CBPeripheral, didUpdateNotificationStateFor characteristic: CBCharacteristic, error: Error?) {
+        guard selected === peripheral else { return }
+        liveSession?.didUpdateNotificationState(for: characteristic, error: error)
+    }
+
+    func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
+        guard selected === peripheral else { return }
+        liveSession?.didUpdateValue(for: characteristic, error: error)
+    }
+
+    func peripheral(_ peripheral: CBPeripheral, didWriteValueFor characteristic: CBCharacteristic, error: Error?) {
+        guard selected === peripheral else { return }
+        liveSession?.didWriteValue(for: characteristic, error: error)
+    }
+
+    func peripheralIsReady(toSendWriteWithoutResponse peripheral: CBPeripheral) {
+        guard selected === peripheral else { return }
+        liveSession?.peripheralIsReadyToSendWriteWithoutResponse()
+    }
+
     func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
         guard selected === peripheral, phase == .discovering else { return }
         if let error {

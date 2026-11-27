@@ -4,8 +4,8 @@ struct DiagnosticsView: View {
     var body: some View {
         GarageScreen {
             diagnosticLink(
-                "Inspect a Bluetooth adapter",
-                detail: "Discover a nearby adapter and inspect its services and characteristics.",
+                "Scan a vehicle with FIXD",
+                detail: "Connect to your FIXD for live standard readings and trouble codes.",
                 icon: "antenna.radiowaves.left.and.right"
             ) {
                 AdapterInspectorView()
