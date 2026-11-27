@@ -403,13 +403,15 @@ final class BluetoothBridge: NSObject, ObservableObject {
     }
 
     private func readVehicle(using session: FIXDLiveSession, mode: ScanMode) async {
+        guard liveSession === session, !Task.isCancelled else { return }
         do {
             let connection: FIXDReadScan.Connection
             if let verified = diagnosticConnection {
                 connection = verified
             } else {
                 connection = try await FIXDReadScan.connect(using: session) { message in
-                    if !isStopRequested { liveScanStatus = message }
+                    guard liveSession === session, !Task.isCancelled, !isStopRequested else { return }
+                    liveScanStatus = message
                 }
                 guard liveSession === session, !Task.isCancelled else { return }
                 diagnosticConnection = connection

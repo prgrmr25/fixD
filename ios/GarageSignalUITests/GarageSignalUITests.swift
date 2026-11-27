@@ -58,6 +58,8 @@ final class GarageSignalUITests: XCTestCase {
         XCTAssertTrue(app.buttons["Scan Nearby"].exists)
         XCTAssertFalse(app.buttons["Scan Vehicle"].exists)
         XCTAssertFalse(app.buttons["Start Live Readings"].exists)
+        XCTAssertFalse(app.buttons["Stop Live Readings"].exists)
+        XCTAssertFalse(app.buttons["Disconnect"].exists)
     }
 
     @MainActor
