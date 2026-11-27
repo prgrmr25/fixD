@@ -1,0 +1,234 @@
+import SwiftUI
+
+@MainActor
+struct SignalCatalogView: View {
+    @ObservedObject var telemetry: DemoTelemetry
+    @State private var query = ""
+
+    private var matchingGroups: [SignalGroup] {
+        let terms = query.split(whereSeparator: \.isWhitespace)
+        guard !terms.isEmpty else { return SignalGroup.catalog }
+        return SignalGroup.catalog.compactMap { group in
+            let matches = group.signals.filter { signal in
+                let searchable = [group.title, signal.title, signal.unit, signal.keywords]
+                    .joined(separator: " ")
+                return terms.allSatisfy { searchable.localizedStandardContains(String($0)) }
+            }
+            return matches.isEmpty ? nil : SignalGroup(title: group.title, signals: matches)
+        }
+    }
+
+    var body: some View {
+        let groups = matchingGroups
+
+        List {
+            if !groups.isEmpty {
+                Section {
+                    Label {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("2011 Acura MDX · 3.7L SH-AWD")
+                                .font(.subheadline.weight(.semibold))
+                            Text("Demo rows use simulated data. Vehicle signals await adapter and ECU verification.")
+                                .font(.footnote)
+                                .foregroundStyle(GarageTheme.mutedText)
+                        }
+                    } icon: {
+                        Image(systemName: "info.circle")
+                            .foregroundStyle(GarageTheme.accent)
+                            .accessibilityHidden(true)
+                    }
+                    .listRowBackground(GarageTheme.surface)
+                }
+            }
+            ForEach(groups) { group in
+                Section(group.title) {
+                    ForEach(group.signals) { signal in
+                        SignalRow(signal: signal, sample: telemetry.samples.last)
+                            .listRowBackground(GarageTheme.surface)
+                    }
+                }
+            }
+        }
+        .listStyle(.insetGrouped)
+        .scrollContentBackground(.hidden)
+        .background(GarageTheme.backdrop)
+        .overlay {
+            if groups.isEmpty {
+                ContentUnavailableView.search(text: query)
+            }
+        }
+        .navigationTitle("Signals")
+        .searchable(text: $query, placement: .navigationBarDrawer(displayMode: .always), prompt: "Find a signal")
+    }
+}
+
+private struct SignalRow: View {
+    let signal: SignalDefinition
+    let sample: DemoSample?
+
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+
+    var body: some View {
+        let stacked = dynamicTypeSize.isAccessibilitySize
+        let layout = stacked
+            ? AnyLayout(VStackLayout(alignment: .leading, spacing: 4))
+            : AnyLayout(HStackLayout(alignment: .center, spacing: 12))
+
+        layout {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(signal.title)
+                    .font(.subheadline.weight(.medium))
+                if let note = signal.note {
+                    Text(note)
+                        .font(.caption)
+                        .foregroundStyle(GarageTheme.mutedText)
+                }
+            }
+            if !stacked {
+                Spacer(minLength: 3)
+            }
+            VStack(alignment: stacked ? .leading : .trailing, spacing: 3) {
+                if let metric = signal.demoMetric, let sample {
+                    Text("\(metric.display(sample[metric])) \(signal.unit)")
+                        .font(.subheadline.monospacedDigit())
+                    Text("Demo")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(GarageTheme.accent)
+                } else {
+                    Text("Unavailable")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(GarageTheme.mutedText)
+                    if !signal.unit.isEmpty {
+                        Text(signal.unit)
+                            .font(.caption2)
+                            .foregroundStyle(GarageTheme.mutedText)
+                    }
+                }
+            }
+        }
+        .accessibilityElement(children: .combine)
+    }
+}
+
+private struct SignalDefinition: Identifiable {
+    let title: String
+    let unit: String
+    let keywords: String
+    let demoMetric: DemoMetric?
+    let note: String?
+
+    var id: String { title }
+
+    init(_ title: String, unit: String = "", keywords: String = "", note: String? = nil) {
+        self.title = title
+        self.unit = unit
+        self.keywords = keywords
+        demoMetric = nil
+        self.note = note
+    }
+
+    init(_ metric: DemoMetric, keywords: String = "") {
+        title = metric.title
+        unit = metric.unit
+        self.keywords = keywords
+        demoMetric = metric
+        note = nil
+    }
+}
+
+private struct SignalGroup: Identifiable {
+    let title: String
+    let signals: [SignalDefinition]
+
+    var id: String { title }
+
+    static let catalog: [Self] = [
+        Self(title: "Engine and lubrication", signals: [
+            .init(.engineSpeed, keywords: "rpm revolutions idle"),
+            .init(
+                "Engine oil pressure", unit: "psi", keywords: "lubrication oil gauge",
+                note: "No verified numeric pressure PID for this vehicle."
+            ),
+            .init(
+                "Oil pressure warning switch", unit: "On/Off", keywords: "lubrication warning light",
+                note: "Documented in HDS. FIXD mapping unverified."
+            ),
+            .init("Engine oil temperature", unit: "°F", keywords: "lubrication temp"),
+            .init(.load),
+            .init(.ignition, keywords: "spark timing advance"),
+            .init("Knock correction", unit: "°", keywords: "ignition retard detonation"),
+            .init("Cylinder 1 misfire count", unit: "Count"),
+            .init("Cylinder 2 misfire count", unit: "Count"),
+            .init("Cylinder 3 misfire count", unit: "Count"),
+            .init("Cylinder 4 misfire count", unit: "Count"),
+            .init("Cylinder 5 misfire count", unit: "Count"),
+            .init("Cylinder 6 misfire count", unit: "Count"),
+        ]),
+        Self(title: "Air, fuel, and emissions", signals: [
+            .init(.throttle, keywords: "TPS ETCS electronic throttle"),
+            .init("Accelerator pedal position", unit: "%", keywords: "APP"),
+            .init("Intake manifold absolute pressure", unit: "kPa", keywords: "MAP vacuum"),
+            .init("Intake air temperature", unit: "°F", keywords: "IAT temp"),
+            .init("Mass air flow", unit: "g/s", keywords: "MAF airflow"),
+            .init("Barometric pressure", unit: "kPa", keywords: "BARO"),
+            .init("Commanded equivalence ratio", unit: "Ratio", keywords: "mixture AFR lambda"),
+            .init("Upstream air/fuel sensor · B1", unit: "λ", keywords: "bank 1 sensor 1 A/F lambda AFR O2"),
+            .init("Upstream air/fuel sensor · B2", unit: "λ", keywords: "bank 2 sensor 1 A/F lambda AFR O2"),
+            .init("Downstream oxygen sensor · B1", unit: "V", keywords: "bank 1 sensor 2 O2"),
+            .init("Downstream oxygen sensor · B2", unit: "V", keywords: "bank 2 sensor 2 O2"),
+            .init(.shortTrimBank1, keywords: "STFT bank 1"),
+            .init(.shortTrimBank2, keywords: "STFT bank 2"),
+            .init(.longTrimBank1, keywords: "LTFT bank 1"),
+            .init(.longTrimBank2, keywords: "LTFT bank 2"),
+            .init("Fuel system loop status", unit: "State", keywords: "open loop closed loop"),
+            .init("Fuel pressure", unit: "psi"),
+            .init("Fuel tank level", unit: "%", keywords: "gasoline"),
+            .init("EVAP purge command", unit: "%", keywords: "evaporative purge duty"),
+        ]),
+        Self(title: "Cooling", signals: [
+            .init(.coolant, keywords: "ECT engine temperature temp"),
+            .init("Secondary coolant temperature", unit: "°F", keywords: "ECT2 temp"),
+            .init("Cooling fan command", unit: "State", keywords: "radiator fan"),
+        ]),
+        Self(title: "Transmission and torque converter", signals: [
+            .init(.vehicleSpeed, keywords: "VSS road speed"),
+            .init("Transmission fluid temperature", unit: "°F", keywords: "ATF TFT temp"),
+            .init("Selected gear", unit: "Position", keywords: "shift selector"),
+            .init("Current gear", unit: "Gear", keywords: "actual gear shift"),
+            .init("Transmission input shaft speed", unit: "rpm", keywords: "turbine ISS"),
+            .init("Transmission output shaft speed", unit: "rpm", keywords: "OSS"),
+            .init("Torque converter clutch command", unit: "State", keywords: "TCC lockup"),
+            .init("Torque converter clutch slip", unit: "rpm", keywords: "TCC lockup slip"),
+            .init("Torque converter clutch duty", unit: "%", keywords: "TCC lockup duty cycle"),
+        ]),
+        Self(title: "SH-AWD and chassis", signals: [
+            .init("SH-AWD operating state", unit: "State", keywords: "AWD differential all wheel drive"),
+            .init("Rear differential fluid temperature", unit: "°F", keywords: "AWD temp"),
+            .init("Rear differential torque command", unit: "N·m", keywords: "AWD torque split"),
+            .init("Left front wheel speed", unit: "mph", keywords: "ABS LF"),
+            .init("Right front wheel speed", unit: "mph", keywords: "ABS RF"),
+            .init("Left rear wheel speed", unit: "mph", keywords: "ABS LR"),
+            .init("Right rear wheel speed", unit: "mph", keywords: "ABS RR"),
+            .init("Steering angle", unit: "°", keywords: "VSA stability"),
+            .init("Brake pedal switch", unit: "State", keywords: "brake VSA"),
+        ]),
+        Self(title: "Electrical", signals: [
+            .init(.voltage, keywords: "battery charging PCM ECU volts"),
+            .init("Battery current", unit: "A", keywords: "amps charging"),
+            .init("Charging command", unit: "%", keywords: "alternator generator"),
+        ]),
+        Self(title: "Codes and readiness", signals: [
+            .init("Malfunction indicator lamp", unit: "State", keywords: "MIL check engine light CEL"),
+            .init("Confirmed trouble codes", unit: "Count", keywords: "stored DTC"),
+            .init("Pending trouble codes", unit: "Count", keywords: "pending DTC"),
+            .init("Permanent trouble codes", unit: "Count", keywords: "permanent DTC"),
+            .init("Misfire monitor", unit: "Status", keywords: "I/M emission readiness"),
+            .init("Fuel system monitor", unit: "Status", keywords: "I/M emission readiness"),
+            .init("Comprehensive component monitor", unit: "Status", keywords: "I/M emission readiness"),
+            .init("Catalyst monitor", unit: "Status", keywords: "I/M emission readiness"),
+            .init("Oxygen sensor monitor", unit: "Status", keywords: "I/M emission readiness"),
+            .init("Oxygen sensor heater monitor", unit: "Status", keywords: "I/M emission readiness"),
+            .init("Evaporative system monitor", unit: "Status", keywords: "EVAP I/M emission readiness"),
+        ]),
+    ]
+}

@@ -16,6 +16,11 @@ struct GarageSignalApp: App {
                 .tabItem { Label("Dashboard", systemImage: "gauge.with.dots.needle.33percent") }
 
                 NavigationStack {
+                    SignalCatalogView(telemetry: telemetry)
+                }
+                .tabItem { Label("Signals", systemImage: "list.bullet") }
+
+                NavigationStack {
                     DiagnosticsView()
                 }
                 .tabItem { Label("Diagnostics", systemImage: "stethoscope") }
