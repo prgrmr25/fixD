@@ -36,6 +36,7 @@ struct SignalCatalogView: View {
                         } else {
                             VehicleTelemetryStatus(
                                 isMonitoring: vehicle.isMonitoring,
+                                isAdapterConnected: vehicle.isAdapterConnected,
                                 lastUpdated: vehicle.lastUpdated
                             )
                         }

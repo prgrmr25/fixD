@@ -91,8 +91,10 @@ enum FIXDReadScan {
         using session: FIXDLiveSession,
         progress: (String) -> Void
     ) async throws -> Connection {
-        progress("Preparing the selected FIXD adapter…")
-        try await session.start()
+        if !session.isReady {
+            progress("Preparing the selected FIXD adapter…")
+            try await session.start()
+        }
 
         progress("Checking for a standard OBD-II response…")
         let probe = DiagnosticRequest.currentData(.supported01Through20)
@@ -123,13 +125,15 @@ enum FIXDReadScan {
     /// Request a new set of readings without repeating adapter setup or reading DTCs.
     static func readCurrentData(
         using session: FIXDLiveSession,
-        connection: Connection
+        connection: Connection,
+        shouldContinue: () -> Bool = { true }
     ) async throws -> CurrentDataFrame {
         guard connection.sessionID == ObjectIdentifier(session) else { throw Failure.mismatchedConnection }
         var readings: [FIXDScanSnapshot.Reading] = []
         var unavailable: [String] = []
         for (pid, title) in measurements {
             try Task.checkCancellation()
+            guard shouldContinue() else { throw CancellationError() }
             let expected = Set(connection.supportedPIDsByECU.compactMap { ecu, supported -> String? in
                 supported.contains(pid.rawValue) ? ecu : nil
             })

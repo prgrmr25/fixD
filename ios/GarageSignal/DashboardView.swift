@@ -45,6 +45,7 @@ struct DashboardView: View {
                     } else {
                         VehicleTelemetryStatus(
                             isMonitoring: vehicle.isMonitoring,
+                            isAdapterConnected: vehicle.isAdapterConnected,
                             lastUpdated: vehicle.lastUpdated
                         )
                         if vehicle.isMonitoring {
@@ -52,7 +53,12 @@ struct DashboardView: View {
                                 .buttonStyle(.bordered)
                                 .accessibilityIdentifier("stop-vehicle-monitoring")
                         } else {
-                            Button("Connect to vehicle", systemImage: "antenna.radiowaves.left.and.right", action: onConnect)
+                            Button(action: onConnect) {
+                                Label(
+                                    vehicle.isAdapterConnected ? "Open Bluetooth Inspector" : "Connect to vehicle",
+                                    systemImage: "antenna.radiowaves.left.and.right"
+                                )
+                            }
                                 .buttonStyle(.borderedProminent)
                                 .accessibilityIdentifier("connect-vehicle")
                         }
@@ -122,14 +128,24 @@ struct TelemetrySourcePicker: View {
 
 struct VehicleTelemetryStatus: View {
     let isMonitoring: Bool
+    let isAdapterConnected: Bool
     let lastUpdated: Date?
+
+    private var waitingMessage: String {
+        if isMonitoring { return "Waiting for vehicle readings." }
+        if isAdapterConnected { return "Ready for a read-only scan." }
+        return "Connect the adapter and start a read-only scan."
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
             if isMonitoring {
                 SourceLabel(title: "Vehicle monitoring active")
             } else {
-                Label("Vehicle monitoring inactive", systemImage: "antenna.radiowaves.left.and.right")
+                Label(
+                    isAdapterConnected ? "FIXD connected" : "Vehicle monitoring inactive",
+                    systemImage: "antenna.radiowaves.left.and.right"
+                )
                     .font(.footnote.weight(.semibold))
                     .foregroundStyle(GarageTheme.mutedText)
             }
@@ -139,7 +155,7 @@ struct VehicleTelemetryStatus: View {
                     .font(.caption)
                     .foregroundStyle(GarageTheme.mutedText)
             } else {
-                Text(isMonitoring ? "Waiting for vehicle readings." : "Connect the adapter and start a read-only scan.")
+                Text(waitingMessage)
                     .font(.caption)
                     .foregroundStyle(GarageTheme.mutedText)
             }

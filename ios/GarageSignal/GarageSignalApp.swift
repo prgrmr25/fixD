@@ -25,7 +25,7 @@ struct GarageSignalApp: App {
                         telemetry: telemetry,
                         vehicle: bridge.vehicle,
                         onConnect: openAdapter,
-                        onStop: bridge.disconnect
+                        onStop: bridge.stopVehicleReadings
                     )
                 }
                 .tabItem { Label("Dashboard", systemImage: "gauge.with.dots.needle.33percent") }

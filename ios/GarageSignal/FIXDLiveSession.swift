@@ -107,6 +107,10 @@ final class FIXDLiveSession {
     }
 
     var isInvalidated: Bool { terminalFailure != nil }
+    var isReady: Bool {
+        if case .ready = phase { return true }
+        return false
+    }
 
     init(peripheral: CBPeripheral, receive: CBCharacteristic, transmit: CBCharacteristic) throws {
         guard peripheral.state == .connected else { throw Failure.disconnected }
