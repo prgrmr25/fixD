@@ -1,3 +1,4 @@
+import Foundation
 import XCTest
 @testable import DiagnosticsCore
 
@@ -42,6 +43,56 @@ final class ELMResponseParserTests: XCTestCase {
         XCTAssertEqual(replies.map(\.outcome), [.currentData(.measurement(1726, .rpm)), .currentData(.measurement(1800, .rpm))])
     }
 
+    func testExtendedCANReplayKeepsCapabilityPagesAndMeasurementsByECU() throws {
+        // Synthetic replies using the 29-bit addresses observed on the test vehicle.
+        let firstPage = try ELMResponseParser.parse(
+            "0100\r18DAF111 06 41 00 00 10 00 01 AA\r18 DA F1 1D 06 41 00 00 00 00 01\r>",
+            for: .currentData(.supported01Through20)
+        )
+        XCTAssertEqual(firstPage.map(\.responder.hexIdentifier), ["18DAF111", "18DAF11D"])
+        XCTAssertEqual(firstPage.map(\.outcome), [
+            .currentData(.supportedPIDs([0x0C, 0x20])),
+            .currentData(.supportedPIDs([0x20]))
+        ])
+
+        let secondPage = try ELMResponseParser.parse(
+            "0120\r18DAF11D0641202000000155\r18 DA F1 11 06 41 20 80 00 00 01\r>",
+            for: .currentData(.supported21Through40)
+        )
+        XCTAssertEqual(secondPage.map(\.responder.hexIdentifier), ["18DAF11D", "18DAF111"])
+        XCTAssertEqual(secondPage.map(\.outcome), [
+            .currentData(.supportedPIDs([0x23, 0x40])),
+            .currentData(.supportedPIDs([0x21, 0x40]))
+        ])
+
+        let thirdPage = try ELMResponseParser.parse(
+            "0140\r18 DA F1 11 06 41 40 40 00 00 10\r18DAF11D0641404000000000\r>",
+            for: .currentData(.supported41Through60)
+        )
+        XCTAssertEqual(thirdPage.map(\.responder.hexIdentifier), ["18DAF111", "18DAF11D"])
+        XCTAssertEqual(thirdPage.map(\.outcome), [
+            .currentData(.supportedPIDs([0x42, 0x5C])),
+            .currentData(.supportedPIDs([0x42]))
+        ])
+
+        let oilTemperature = try ELMResponseParser.parse(
+            "015C\r18DAF11103415C8CAAAAAAAA\r>",
+            for: .currentData(.engineOilTemperature)
+        )
+        XCTAssertEqual(oilTemperature.map(\.responder.hexIdentifier), ["18DAF111"])
+        XCTAssertEqual(oilTemperature.map(\.outcome), [.currentData(.measurement(100, .celsius))])
+
+        let voltage = try ELMResponseParser.parse(
+            "0142\r18DAF11D 04 41 42 30 D4\r18 DA F1 11 04 41 42 36 B0\r>",
+            for: .currentData(.controlModuleVoltage)
+        )
+        XCTAssertEqual(voltage.map(\.responder.hexIdentifier), ["18DAF11D", "18DAF111"])
+        XCTAssertEqual(voltage.map(\.outcome), [
+            .currentData(.measurement(12.5, .volts)),
+            .currentData(.measurement(14, .volts))
+        ])
+    }
+
     func testEachDTCServiceAndEmptyPositiveList() throws {
         let replies = try ELMResponseParser.parse(
             "03\r7E8 06 43 02 01 33 D0 16 AA\r7E9 02 43 00\r",
@@ -70,7 +121,8 @@ final class ELMResponseParserTests: XCTestCase {
     }
 
     func testISOTransportSequenceRollsOverAfterFifteen() throws {
-        let payload: [UInt8] = [0x43, 60] + (1...60).flatMap { [0, UInt8($0)] }
+        let codes = (1...60).map { UInt8($0) }
+        let payload: [UInt8] = [0x43, UInt8(codes.count)] + codes.flatMap { [0, $0] }
         func line(_ frame: [UInt8]) -> String {
             "7E8 " + frame.map { String(format: "%02X", Int($0)) }.joined(separator: " ")
         }
@@ -81,7 +133,7 @@ final class ELMResponseParserTests: XCTestCase {
         }
         let result = try ELMResponseParser.parse(lines.joined(separator: "\r"), for: .troubleCodes(.stored))
         XCTAssertEqual(result.first?.payload, payload)
-        XCTAssertEqual(result.first?.outcome, .troubleCodes((1...60).map { String(format: "P%04X", $0) }))
+        XCTAssertEqual(result.first?.outcome, .troubleCodes(codes.map { String(format: "P%04X", Int($0)) }))
     }
 
     func testNegativeResponsePreservesECUAndPendingCanPrecedeSuccess() throws {

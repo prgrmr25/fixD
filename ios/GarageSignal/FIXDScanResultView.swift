@@ -66,9 +66,7 @@ struct FIXDScanResultView: View {
                             Text("No codes returned")
                                 .foregroundStyle(.secondary)
                         } else {
-                            Text(ecu.codes.joined(separator: ", "))
-                                .monospaced()
-                                .textSelection(.enabled)
+                            VehicleTroubleCodeList(codes: ecu.codes)
                         }
                     }
                 }
@@ -95,8 +93,33 @@ private extension FIXDScanSnapshot {
             for ecu in group.ecus {
                 let codes = ecu.codes.isEmpty ? "No codes returned" : ecu.codes.joined(separator: ", ")
                 lines.append("ECU \(ecu.id): " + (ecu.unavailableReason ?? codes))
+                for code in ecu.codes {
+                    if let description = MDXTroubleCode.description(for: code) {
+                        lines.append("2011 MDX reference · \(code): \(description)")
+                    }
+                }
             }
         }
         return lines.joined(separator: "\n")
+    }
+}
+
+struct VehicleTroubleCodeList: View {
+    let codes: [String]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            ForEach(codes, id: \.self) { code in
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(code).monospaced()
+                    if let description = MDXTroubleCode.description(for: code) {
+                        Text("2011 MDX · " + description)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+        }
+        .textSelection(.enabled)
     }
 }

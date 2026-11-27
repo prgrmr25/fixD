@@ -18,6 +18,73 @@ final class CurrentDataTests: XCTestCase {
         )
     }
 
+    func testExtendedCapabilityBitmapsReturnAbsolutePIDValues() throws {
+        XCTAssertTrue(CurrentDataPID.supported01Through20.isCapabilityBitmap)
+        XCTAssertTrue(CurrentDataPID.supported21Through40.isCapabilityBitmap)
+        XCTAssertTrue(CurrentDataPID.supported41Through60.isCapabilityBitmap)
+        XCTAssertEqual(CurrentDataPID.supported21Through40.requestPayload, [0x01, 0x20])
+        XCTAssertEqual(CurrentDataPID.supported41Through60.requestPayload, [0x01, 0x40])
+        XCTAssertEqual(
+            try CurrentDataDecoder.decode([0x41, 0x20, 0x81, 0, 0, 0x01], for: .supported21Through40),
+            .supportedPIDs([0x21, 0x28, 0x40])
+        )
+        XCTAssertEqual(
+            try CurrentDataDecoder.decode([0x41, 0x40, 0xC0, 0, 0, 0x11], for: .supported41Through60),
+            .supportedPIDs([0x41, 0x42, 0x5C, 0x60])
+        )
+        XCTAssertEqual(
+            try CurrentDataDecoder.decode([0x41, 0x40, 0, 0, 0, 0], for: .supported41Through60),
+            .supportedPIDs([])
+        )
+    }
+
+    func testOilTemperatureAndControlModuleVoltageUseStandardScales() throws {
+        XCTAssertFalse(CurrentDataPID.engineOilTemperature.isCapabilityBitmap)
+        XCTAssertFalse(CurrentDataPID.controlModuleVoltage.isCapabilityBitmap)
+        XCTAssertEqual(CurrentDataPID.engineOilTemperature.requestPayload, [0x01, 0x5C])
+        XCTAssertEqual(CurrentDataPID.controlModuleVoltage.requestPayload, [0x01, 0x42])
+        XCTAssertEqual(
+            try CurrentDataDecoder.decode([0x41, 0x5C, 0x8C], for: .engineOilTemperature),
+            .measurement(100, .celsius)
+        )
+        XCTAssertEqual(
+            try CurrentDataDecoder.decode([0x41, 0x5C, 0], for: .engineOilTemperature),
+            .measurement(-40, .celsius)
+        )
+        XCTAssertEqual(
+            try CurrentDataDecoder.decode([0x41, 0x42, 0x36, 0xB0], for: .controlModuleVoltage),
+            .measurement(14, .volts)
+        )
+        XCTAssertEqual(
+            try CurrentDataDecoder.decode([0x41, 0x42, 0x30, 0xD4], for: .controlModuleVoltage),
+            .measurement(12.5, .volts)
+        )
+    }
+
+    func testExtendedRepliesRejectWrongLengthsAndDoNotConfusePIDs() {
+        let cases: [(CurrentDataPID, [UInt8], CurrentDataDecodingError)] = [
+            (.supported21Through40, [0x41, 0x20, 0x80, 0, 0], .invalidLength(expected: 4, received: 3)),
+            (.supported41Through60, [0x41, 0x40, 0, 0, 0, 0, 0], .invalidLength(expected: 4, received: 5)),
+            (.engineOilTemperature, [0x41, 0x5C], .invalidLength(expected: 1, received: 0)),
+            (.engineOilTemperature, [0x41, 0x5C, 0x8C, 0], .invalidLength(expected: 1, received: 2)),
+            (.controlModuleVoltage, [0x41, 0x42, 0x36], .invalidLength(expected: 2, received: 1)),
+            (.controlModuleVoltage, [0x41, 0x42, 0x36, 0xB0, 0], .invalidLength(expected: 2, received: 3)),
+            (
+                .engineOilTemperature, [0x41, 0x40, 0xC0, 0, 0, 0x11],
+                .mismatchedPID(expected: 0x5C, received: 0x40)
+            ),
+            (
+                .supported41Through60, [0x41, 0x42, 0x36, 0xB0],
+                .mismatchedPID(expected: 0x40, received: 0x42)
+            )
+        ]
+        for (pid, payload, expected) in cases {
+            XCTAssertThrowsError(try CurrentDataDecoder.decode(payload, for: pid)) { error in
+                XCTAssertEqual(error as? CurrentDataDecodingError, expected)
+            }
+        }
+    }
+
     func testStandardMeasurementScaling() throws {
         let examples: [(CurrentDataPID, UInt8, CurrentDataValue)] = [
             (.coolantTemperature, 0x46, .measurement(30, .celsius)),

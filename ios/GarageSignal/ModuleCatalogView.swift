@@ -263,9 +263,7 @@ private struct ModuleDetailsView: View {
                                     Text("No codes returned")
                                         .foregroundStyle(GarageTheme.mutedText)
                                 } else {
-                                    Text(ecu.codes.joined(separator: ", "))
-                                        .monospaced()
-                                        .textSelection(.enabled)
+                                    VehicleTroubleCodeList(codes: ecu.codes)
                                 }
                             }
                             .font(.subheadline)

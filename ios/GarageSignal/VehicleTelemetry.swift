@@ -17,7 +17,7 @@ final class VehicleTelemetry: ObservableObject {
     }
 
     private struct Channel: Hashable {
-        let metric: DemoMetric
+        let pid: CurrentDataPID
         let ecu: String
     }
 
@@ -26,17 +26,21 @@ final class VehicleTelemetry: ObservableObject {
     @Published private(set) var lastUpdated: Date?
     @Published private(set) var responders: [String] = []
     @Published private(set) var troubleCodes: [FIXDScanSnapshot.TroubleCodes] = []
-    @Published private var latest: [DemoMetric: [Reading]] = [:]
+    @Published private var latest: [CurrentDataPID: [Reading]] = [:]
 
     private var recent: [Channel: [Double]] = [:]
     private let historyLimit = 60
 
     func readings(for metric: DemoMetric) -> [Reading] {
-        latest[metric] ?? []
+        readings(forPID: Self.pid(for: metric))
+    }
+
+    func readings(forPID pid: CurrentDataPID) -> [Reading] {
+        latest[pid] ?? []
     }
 
     func history(for metric: DemoMetric, ecu: String) -> [Double] {
-        recent[Channel(metric: metric, ecu: ecu)] ?? []
+        recent[Channel(pid: Self.pid(for: metric), ecu: ecu)] ?? []
     }
 
     func clearForNewAdapter() {
@@ -63,12 +67,12 @@ final class VehicleTelemetry: ObservableObject {
     }
 
     func record(readings: [FIXDScanSnapshot.Reading], capturedAt: Date) {
-        var channels: [DemoMetric: [Reading]] = [:]
+        var channels: [CurrentDataPID: [Reading]] = [:]
         for reading in readings {
-            guard let metric = Self.metric(for: reading.pid), reading.value.isFinite else { continue }
-            let value = Self.displayValue(reading.value, for: metric)
-            let channel = Channel(metric: metric, ecu: reading.ecu)
-            channels[metric, default: []].append(Reading(ecu: reading.ecu, value: value))
+            guard reading.value.isFinite else { continue }
+            let value = Self.displayValue(reading.value, for: reading.pid)
+            let channel = Channel(pid: reading.pid, ecu: reading.ecu)
+            channels[reading.pid, default: []].append(Reading(ecu: reading.ecu, value: value))
             recent[channel, default: []].append(value)
             if let count = recent[channel]?.count, count > historyLimit {
                 recent[channel]?.removeFirst(count - historyLimit)
@@ -82,26 +86,26 @@ final class VehicleTelemetry: ObservableObject {
         troubleCodes = groups
     }
 
-    private static func metric(for pid: CurrentDataPID) -> DemoMetric? {
-        switch pid {
+    private static func pid(for metric: DemoMetric) -> CurrentDataPID {
+        switch metric {
         case .engineSpeed: return .engineSpeed
         case .vehicleSpeed: return .vehicleSpeed
-        case .coolantTemperature: return .coolant
-        case .ignitionAdvance: return .ignition
-        case .calculatedEngineLoad: return .load
-        case .throttlePosition: return .throttle
-        case .shortTermFuelTrimBank1: return .shortTrimBank1
-        case .longTermFuelTrimBank1: return .longTrimBank1
-        case .shortTermFuelTrimBank2: return .shortTrimBank2
-        case .longTermFuelTrimBank2: return .longTrimBank2
-        default: return nil
+        case .coolant: return .coolantTemperature
+        case .ignition: return .ignitionAdvance
+        case .load: return .calculatedEngineLoad
+        case .throttle: return .throttlePosition
+        case .voltage: return .controlModuleVoltage
+        case .shortTrimBank1: return .shortTermFuelTrimBank1
+        case .longTrimBank1: return .longTermFuelTrimBank1
+        case .shortTrimBank2: return .shortTermFuelTrimBank2
+        case .longTrimBank2: return .longTermFuelTrimBank2
         }
     }
 
-    private static func displayValue(_ value: Double, for metric: DemoMetric) -> Double {
-        switch metric {
+    private static func displayValue(_ value: Double, for pid: CurrentDataPID) -> Double {
+        switch pid {
         case .vehicleSpeed: return value / 1.609344
-        case .coolant: return value * 9 / 5 + 32
+        case .coolantTemperature, .engineOilTemperature: return value * 9 / 5 + 32
         default: return value
         }
     }

@@ -1,3 +1,4 @@
+import DiagnosticsCore
 import SwiftUI
 
 @MainActor
@@ -67,14 +68,21 @@ struct SignalCatalogView: View {
     }
 
     private func values(for signal: SignalDefinition) -> [SignalValue] {
-        guard let metric = signal.metric else { return [] }
         switch source {
         case .demo:
-            guard let sample = telemetry.samples.last else { return [] }
+            guard let metric = signal.metric, let sample = telemetry.samples.last else { return [] }
             return [SignalValue(text: metric.display(sample[metric]), source: "Demo")]
         case .vehicle:
-            return vehicle.readings(for: metric).map {
-                SignalValue(text: metric.display($0.value), source: "ECU \($0.ecu)")
+            let readings: [VehicleTelemetry.Reading]
+            if let vehiclePID = signal.vehiclePID {
+                readings = vehicle.readings(forPID: vehiclePID)
+            } else if let metric = signal.metric {
+                readings = vehicle.readings(for: metric)
+            } else {
+                return []
+            }
+            return readings.map {
+                SignalValue(text: signal.display($0.value), source: "ECU \($0.ecu)")
             }
         }
     }
@@ -145,15 +153,23 @@ private struct SignalDefinition: Identifiable {
     let keywords: String
     let metric: DemoMetric?
     let note: String?
+    let vehiclePID: CurrentDataPID?
 
     var id: String { title }
 
-    init(_ title: String, unit: String = "", keywords: String = "", note: String? = nil) {
+    init(
+        _ title: String,
+        unit: String = "",
+        keywords: String = "",
+        note: String? = nil,
+        vehiclePID: CurrentDataPID? = nil
+    ) {
         self.title = title
         self.unit = unit
         self.keywords = keywords
         metric = nil
         self.note = note
+        self.vehiclePID = vehiclePID
     }
 
     init(_ metric: DemoMetric, keywords: String = "") {
@@ -162,6 +178,11 @@ private struct SignalDefinition: Identifiable {
         self.keywords = keywords
         self.metric = metric
         note = nil
+        vehiclePID = nil
+    }
+
+    func display(_ value: Double) -> String {
+        metric?.display(value) ?? value.formatted(.number.precision(.fractionLength(0)))
     }
 }
 
@@ -180,9 +201,16 @@ private struct SignalGroup: Identifiable {
             ),
             .init(
                 "Oil pressure warning switch", unit: "On/Off", keywords: "lubrication warning light",
-                note: "Documented in HDS. FIXD mapping unverified."
+                note: "Main low-oil-pressure warning. FIXD read unverified."
             ),
-            .init("Engine oil temperature", unit: "°F", keywords: "lubrication temp"),
+            .init(
+                "VTEC oil-pressure switch", unit: "On/Off", keywords: "rocker arm valve timing vtec pres sw",
+                note: "Rocker-arm switch in Honda HDS. FIXD read unverified."
+            ),
+            .init(
+                "Engine oil temperature", unit: "°F", keywords: "lubrication temp",
+                vehiclePID: .engineOilTemperature
+            ),
             .init(.load),
             .init(.ignition, keywords: "spark timing advance"),
             .init("Knock correction", unit: "°", keywords: "ignition retard detonation"),

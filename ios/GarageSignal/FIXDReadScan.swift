@@ -115,6 +115,25 @@ enum FIXDReadScan {
         }
         guard !supportByECU.isEmpty else { throw Failure.noSupportedPIDReply }
 
+        // Standard continuation bits qualify the next bitmap for each ECU independently.
+        let additionalPages: [CurrentDataPID] = [.supported21Through40, .supported41Through60]
+        for page in additionalPages {
+            try Task.checkCancellation()
+            let expected = Set(supportByECU.filter { $0.value.contains(page.rawValue) }.keys)
+            guard !expected.isEmpty else { break }
+            progress("Checking additional standard signals…")
+            let request = DiagnosticRequest.currentData(page)
+            let response = try await session.read(request)
+            // A complete but invalid optional bitmap leaves the base signal list usable.
+            guard let pageAnswers = try? ELMResponseParser.parse(response, for: request) else { break }
+            for answer in pageAnswers {
+                let ecu = answer.responder.hexIdentifier
+                if expected.contains(ecu), case .currentData(.supportedPIDs(let supported)) = answer.outcome {
+                    supportByECU[ecu, default: []].formUnion(supported)
+                }
+            }
+        }
+
         return Connection(
             vehicleProtocol: protocolName,
             sessionID: ObjectIdentifier(session),
@@ -220,6 +239,7 @@ enum FIXDReadScan {
         case .rpm: return "rpm"
         case .kilometersPerHour: return "km/h"
         case .degreesBeforeTopDeadCenter: return "° BTDC"
+        case .volts: return "V"
         }
     }
 
@@ -234,6 +254,8 @@ enum FIXDReadScan {
         (.longTermFuelTrimBank1, "Long-term fuel trim, bank 1"),
         (.shortTermFuelTrimBank2, "Short-term fuel trim, bank 2"),
         (.longTermFuelTrimBank2, "Long-term fuel trim, bank 2"),
+        (.engineOilTemperature, "Engine oil temperature"),
+        (.controlModuleVoltage, "Module voltage"),
     ]
 
     private static let codeCategories: [(TroubleCodeCategory, String)] = [
