@@ -2,6 +2,7 @@
 /// payload. Adapter and vehicle framing are the responsibility of the transport.
 public enum CurrentDataPID: UInt8, CaseIterable, Sendable {
     case supported01Through20 = 0x00
+    case calculatedEngineLoad = 0x04
     case coolantTemperature = 0x05
     case shortTermFuelTrimBank1 = 0x06
     case longTermFuelTrimBank1 = 0x07
@@ -10,6 +11,7 @@ public enum CurrentDataPID: UInt8, CaseIterable, Sendable {
     case engineSpeed = 0x0C
     case vehicleSpeed = 0x0D
     case ignitionAdvance = 0x0E
+    case throttlePosition = 0x11
 
     public var requestPayload: [UInt8] { [0x01, rawValue] }
 
@@ -73,6 +75,8 @@ public enum CurrentDataDecoder {
                 }
             }
             return .supportedPIDs(supported)
+        case .calculatedEngineLoad, .throttlePosition:
+            return .measurement(a * 100 / 255, .percent)
         case .coolantTemperature:
             return .measurement(a - 40, .celsius)
         case .shortTermFuelTrimBank1, .longTermFuelTrimBank1, .shortTermFuelTrimBank2, .longTermFuelTrimBank2:

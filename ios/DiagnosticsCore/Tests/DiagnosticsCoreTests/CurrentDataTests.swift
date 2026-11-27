@@ -33,6 +33,19 @@ final class CurrentDataTests: XCTestCase {
         }
     }
 
+    func testCalculatedLoadAndThrottleAreReadOnlyWithStandardPercentScaling() throws {
+        XCTAssertEqual(CurrentDataPID.calculatedEngineLoad.requestPayload, [0x01, 0x04])
+        XCTAssertEqual(CurrentDataPID.throttlePosition.requestPayload, [0x01, 0x11])
+        XCTAssertEqual(
+            try CurrentDataDecoder.decode([0x41, 0x04, 0x33], for: .calculatedEngineLoad),
+            .measurement(20, .percent)
+        )
+        XCTAssertEqual(
+            try CurrentDataDecoder.decode([0x41, 0x11, 0xCC], for: .throttlePosition),
+            .measurement(80, .percent)
+        )
+    }
+
     func testRejectsMalformedUnmatchedAndNegativeResponses() {
         let cases: [([UInt8], CurrentDataDecodingError)] = [
             ([0x41], .malformedPayload),

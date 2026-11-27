@@ -1,3 +1,4 @@
+import Foundation
 import SwiftUI
 
 struct FIXDScanResultView: View {
@@ -14,6 +15,10 @@ struct FIXDScanResultView: View {
             Text(snapshot.capturedAt, format: .dateTime.month().day().hour().minute().second())
                 .font(.caption)
                 .foregroundStyle(.secondary)
+
+            ShareLink(item: snapshot.shareText, subject: Text("Vehicle scan report")) {
+                Label("Share Vehicle Scan", systemImage: "square.and.arrow.up")
+            }
         }
 
         Section("Vehicle Readings") {
@@ -69,5 +74,29 @@ struct FIXDScanResultView: View {
                 }
             }
         }
+    }
+}
+
+private extension FIXDScanSnapshot {
+    var shareText: String {
+        var lines = [
+            "Read-Only Vehicle Scan",
+            "Captured: \(capturedAt.ISO8601Format())",
+            "Protocol: \(vehicleProtocol)",
+            "Responding ECUs: " + responders.joined(separator: ", "),
+        ]
+        for reading in readings {
+            let value = reading.value.formatted(.number.precision(.fractionLength(0...2)))
+            lines.append("ECU \(reading.ecu) · \(reading.title): \(value) \(reading.unit)")
+        }
+        for group in troubleCodes {
+            lines.append(group.title)
+            if let status = group.status { lines.append(status) }
+            for ecu in group.ecus {
+                let codes = ecu.codes.isEmpty ? "No codes returned" : ecu.codes.joined(separator: ", ")
+                lines.append("ECU \(ecu.id): " + (ecu.unavailableReason ?? codes))
+            }
+        }
+        return lines.joined(separator: "\n")
     }
 }

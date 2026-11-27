@@ -57,6 +57,7 @@ final class GarageSignalUITests: XCTestCase {
         XCTAssertTrue(app.navigationBars["Bluetooth Inspector"].waitForExistence(timeout: 8))
         XCTAssertTrue(app.buttons["Scan Nearby"].exists)
         XCTAssertFalse(app.buttons["Scan Vehicle"].exists)
+        XCTAssertFalse(app.buttons["Start Live Readings"].exists)
     }
 
     @MainActor
@@ -77,5 +78,24 @@ final class GarageSignalUITests: XCTestCase {
         app.launch()
         app.tabBars.buttons["Drive Logs"].tap()
         XCTAssertTrue(app.buttons.matching(identifier: "export-demo").firstMatch.waitForExistence(timeout: 5))
+    }
+
+    @MainActor
+    func testVehicleAndDemoRemainDistinctSources() {
+        let app = XCUIApplication()
+        app.launch()
+
+        let connect = app.buttons["connect-vehicle"]
+        XCTAssertTrue(connect.waitForExistence(timeout: 8))
+        XCTAssertFalse(app.staticTexts["Simulated telemetry"].exists)
+        app.buttons["Demo"].tap()
+        XCTAssertTrue(app.staticTexts["Simulated telemetry"].waitForExistence(timeout: 5))
+        XCTAssertFalse(connect.exists)
+
+        app.tabBars.buttons["Signals"].tap()
+        XCTAssertTrue(app.staticTexts["Simulated telemetry"].waitForExistence(timeout: 5))
+        app.buttons["Vehicle"].tap()
+        XCTAssertTrue(app.staticTexts["Vehicle monitoring inactive"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.staticTexts["Simulated telemetry"].exists)
     }
 }

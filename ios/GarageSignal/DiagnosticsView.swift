@@ -1,6 +1,8 @@
 import SwiftUI
 
 struct DiagnosticsView: View {
+    @ObservedObject var bridge: BluetoothBridge
+
     var body: some View {
         GarageScreen {
             diagnosticLink(
@@ -8,14 +10,14 @@ struct DiagnosticsView: View {
                 detail: "Connect to your FIXD for live standard readings and trouble codes.",
                 icon: "antenna.radiowaves.left.and.right"
             ) {
-                AdapterInspectorView()
+                AdapterInspectorView(bridge: bridge)
             }
             diagnosticLink(
                 "2011 Acura MDX modules",
                 detail: "Explore PCM, transmission, SH-AWD and other vehicle systems.",
                 icon: "car.side"
             ) {
-                ModuleCatalogView()
+                ModuleCatalogView(vehicle: bridge.vehicle)
             }
             diagnosticLink(
                 "Honda/Acura service functions",

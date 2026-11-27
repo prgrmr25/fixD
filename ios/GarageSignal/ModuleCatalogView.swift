@@ -13,9 +13,9 @@ private struct VehicleModule: Identifiable {
             id: "pcm", name: "Engine and PCM", icon: "engine.combustion",
             detail: "3.7 L V6 · PGM-FI powertrain control",
             readings: [
-                "PCM identification and calibration", "Engine RPM, load and coolant temperature",
-                "Bank 1 and Bank 2 fuel trims", "Ignition advance and knock correction",
-                "Cylinder 1–6 misfire counts", "DTCs, freeze frame and monitor readiness"
+                "Factory PCM identification and calibration", "Cylinder 1–6 misfire counts",
+                "Honda/Acura knock correction", "Manufacturer-specific DTCs",
+                "Freeze frame and monitor readiness"
             ],
             serviceFunctions: ["PCM learned-value reset", "Throttle position learn", "Idle learn"]
         ),
@@ -78,15 +78,13 @@ private struct VehicleModule: Identifiable {
 }
 
 struct ModuleCatalogView: View {
+    @ObservedObject var vehicle: VehicleTelemetry
+
     var body: some View {
         GarageScreen {
-            VStack(alignment: .leading, spacing: 6) {
-                Text("2011 Acura MDX 3.7L SH-AWD")
-                    .font(.title2.bold())
-                Text("Module inventory and readings need verification on your vehicle. This list describes the systems in scope.")
-                    .font(.subheadline)
-                    .foregroundStyle(GarageTheme.mutedText)
-            }
+            Text("2011 Acura MDX 3.7L SH-AWD")
+                .font(.title2.bold())
+            VehicleLinkPanel(vehicle: vehicle)
             section("Powertrain", modules: VehicleModule.powertrain)
             section("Other systems", modules: VehicleModule.otherSystems)
         }
@@ -104,7 +102,7 @@ struct ModuleCatalogView: View {
                             Divider()
                         }
                         NavigationLink {
-                            ModuleDetailsView(module: module)
+                            ModuleDetailsView(module: module, vehicle: vehicle)
                         } label: {
                             Label {
                                 VStack(alignment: .leading, spacing: 4) {
@@ -131,19 +129,74 @@ struct ModuleCatalogView: View {
     }
 }
 
+private struct VehicleLinkPanel: View {
+    @ObservedObject var vehicle: VehicleTelemetry
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Vehicle link").font(.headline)
+            GaragePanel {
+                VStack(alignment: .leading, spacing: 10) {
+                    LabeledContent("FIXD adapter", value: vehicle.isAdapterConnected ? "Connected" : "Disconnected")
+                    LabeledContent("Standard OBD-II", value: diagnosticStatus)
+                    if !vehicle.responders.isEmpty {
+                        LabeledContent(vehicle.isAdapterConnected ? "ECU responders" : "Last ECU responders",
+                                       value: vehicle.responders.count.formatted())
+                    }
+                    if let updated = vehicle.lastUpdated {
+                        LabeledContent("Last reading", value: updated.formatted(date: .abbreviated, time: .shortened))
+                    }
+                }
+                .font(.subheadline)
+            }
+        }
+    }
+
+    private var diagnosticStatus: String {
+        if vehicle.isMonitoring { return "Monitoring" }
+        if vehicle.lastUpdated != nil { return "Last readings available" }
+        if vehicle.isAdapterConnected { return vehicle.responders.isEmpty ? "Awaiting vehicle response" : "Vehicle responded" }
+        return "No vehicle data"
+    }
+}
+
 private struct ModuleDetailsView: View {
     let module: VehicleModule
+    @ObservedObject var vehicle: VehicleTelemetry
+
+    private var isEngine: Bool { module.id == "pcm" }
 
     var body: some View {
         GarageScreen {
-            VStack(alignment: .leading, spacing: 8) {
-                Text(module.detail)
-                    .font(.title3.bold())
-                Text("Vehicle support unverified")
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(GarageTheme.warning)
+            Text(module.detail)
+                .font(.title3.bold())
+
+            VehicleLinkPanel(vehicle: vehicle)
+
+            section("Module status") {
+                VStack(alignment: .leading, spacing: 6) {
+                    if isEngine {
+                        Text(vehicle.responders.isEmpty ? "Awaiting standard OBD-II data" : "Standard OBD-II responses received")
+                            .font(.subheadline.weight(.semibold))
+                    }
+                    Text("Vehicle support unverified")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(GarageTheme.warning)
+                    Text(isEngine
+                         ? "ECU labels identify standard OBD-II responders. The factory PCM identity is unverified."
+                         : "\(module.name) identification and diagnostics require a verified module-specific response.")
+                        .font(.caption)
+                        .foregroundStyle(GarageTheme.mutedText)
+                }
             }
-            items("Read-only diagnostics", values: module.readings, status: "Awaiting vehicle validation")
+
+            if isEngine {
+                engineReadings
+                engineTroubleCodes
+            }
+
+            items(isEngine ? "Additional PCM diagnostics" : "Read-only diagnostics",
+                  values: module.readings, status: "Awaiting vehicle validation")
             if !module.serviceFunctions.isEmpty {
                 items("Service functions", values: module.serviceFunctions, status: "Unavailable")
             }
@@ -152,24 +205,106 @@ private struct ModuleDetailsView: View {
         .navigationBarTitleDisplayMode(.inline)
     }
 
-    private func items(_ title: String, values: [String], status: String) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text(title).font(.headline)
-            GaragePanel {
-                VStack(alignment: .leading, spacing: 12) {
-                    ForEach(values, id: \.self) { value in
-                        if value != values.first {
-                            Divider()
+    private var engineReadings: some View {
+        section("Standard OBD-II readings") {
+            VStack(alignment: .leading, spacing: 12) {
+                let metrics = DemoMetric.allCases.filter { !vehicle.readings(for: $0).isEmpty }
+                if metrics.isEmpty {
+                    Text("Connect to FIXD and start monitoring to see supported readings.")
+                        .font(.subheadline)
+                        .foregroundStyle(GarageTheme.mutedText)
+                }
+
+                ForEach(metrics) { metric in
+                    if metric != metrics.first { Divider() }
+                    ForEach(vehicle.readings(for: metric)) { reading in
+                        LabeledContent {
+                            Text("\(metric.display(reading.value)) \(metric.unit)")
+                                .monospacedDigit()
+                        } label: {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(metric.title)
+                                ecuLabel(reading.ecu)
+                            }
                         }
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(value)
-                                .font(.subheadline.weight(.semibold))
+                    }
+                }
+            }
+        }
+    }
+
+    private var engineTroubleCodes: some View {
+        section("Standard OBD-II trouble codes") {
+            VStack(alignment: .leading, spacing: 12) {
+                let groups = vehicle.troubleCodes
+                if groups.isEmpty {
+                    Text("Run a vehicle scan to check for trouble codes.")
+                        .font(.subheadline)
+                        .foregroundStyle(GarageTheme.mutedText)
+                }
+
+                ForEach(groups) { group in
+                    if group.id != groups.first?.id { Divider() }
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text(group.title)
+                            .font(.subheadline.weight(.semibold))
+                        if let status = group.status {
                             Text(status)
                                 .font(.caption)
                                 .foregroundStyle(GarageTheme.mutedText)
                         }
-                        .accessibilityElement(children: .combine)
+                        ForEach(group.ecus) { ecu in
+                            VStack(alignment: .leading, spacing: 4) {
+                                ecuLabel(ecu.id)
+                                if let unavailable = ecu.unavailableReason {
+                                    Text(unavailable)
+                                        .foregroundStyle(GarageTheme.mutedText)
+                                } else if ecu.codes.isEmpty {
+                                    Text("No codes returned")
+                                        .foregroundStyle(GarageTheme.mutedText)
+                                } else {
+                                    Text(ecu.codes.joined(separator: ", "))
+                                        .monospaced()
+                                        .textSelection(.enabled)
+                                }
+                            }
+                            .font(.subheadline)
+                            .accessibilityElement(children: .combine)
+                        }
                     }
+                }
+            }
+        }
+    }
+
+    private func ecuLabel(_ identifier: String) -> some View {
+        Text("ECU " + identifier)
+            .font(.caption.monospaced())
+            .foregroundStyle(GarageTheme.mutedText)
+    }
+
+    private func section<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(title).font(.headline)
+            GaragePanel(content: content)
+        }
+    }
+
+    private func items(_ title: String, values: [String], status: String) -> some View {
+        section(title) {
+            VStack(alignment: .leading, spacing: 12) {
+                ForEach(values, id: \.self) { value in
+                    if value != values.first {
+                        Divider()
+                    }
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(value)
+                            .font(.subheadline.weight(.semibold))
+                        Text(status)
+                            .font(.caption)
+                            .foregroundStyle(GarageTheme.mutedText)
+                    }
+                    .accessibilityElement(children: .combine)
                 }
             }
         }

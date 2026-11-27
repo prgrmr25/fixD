@@ -4,8 +4,7 @@ import SwiftUI
 
 @MainActor
 struct AdapterInspectorView: View {
-    @StateObject private var bridge = BluetoothBridge()
-    @Environment(\.scenePhase) private var scenePhase
+    @ObservedObject var bridge: BluetoothBridge
 
     var body: some View {
         List {
@@ -64,13 +63,14 @@ struct AdapterInspectorView: View {
                         Text(scanStatus)
                             .font(.footnote)
                             .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
                     }
                     if bridge.isLiveScanRunning {
-                        ProgressView()
-                            .accessibilityLabel("Reading vehicle diagnostics")
+                        Button("Stop Vehicle Readings", systemImage: "stop.circle", action: bridge.disconnect)
                     } else if bridge.canStartLiveScan {
                         Button("Scan Vehicle", systemImage: "stethoscope", action: bridge.startLiveScan)
-                        Text("With the vehicle parked and ignition on, start a standard OBD-II scan. No codes or learned values are cleared.")
+                        Button("Start Live Readings", systemImage: "waveform.path", action: bridge.startMonitoring)
+                        Text("With the vehicle parked and ignition on, start a scan or stream supported readings to the Dashboard and Signals tabs.")
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                     }
@@ -141,9 +141,8 @@ struct AdapterInspectorView: View {
         .listStyle(.insetGrouped)
         .navigationTitle("Bluetooth Inspector")
         .navigationBarTitleDisplayMode(.inline)
-        .onDisappear(perform: bridge.close)
-        .onChange(of: scenePhase) { _, phase in
-            if phase == .background {
+        .onDisappear {
+            if !bridge.isLiveScanRunning {
                 bridge.close()
             }
         }
@@ -303,14 +302,15 @@ private struct DiscoveryReport {
 }
 
 @MainActor
-private final class BluetoothBridge: NSObject, ObservableObject {
+final class BluetoothBridge: NSObject, ObservableObject {
+    let vehicle = VehicleTelemetry()
     private enum Phase: Equatable {
         case idle, startingScan, scanning, connecting, discovering, ready, disconnecting
     }
 
     @Published private(set) var status = "Ready to scan for nearby peripherals."
-    @Published private(set) var devices: [NearbyDevice] = []
-    @Published private(set) var report: DiscoveryReport?
+    @Published fileprivate var devices: [NearbyDevice] = []
+    @Published fileprivate var report: DiscoveryReport?
     @Published private(set) var liveScanStatus: String?
     @Published private(set) var liveScanResult: FIXDScanSnapshot?
     @Published private(set) var isLiveScanRunning = false
@@ -348,6 +348,14 @@ private final class BluetoothBridge: NSObject, ObservableObject {
     }
 
     func startLiveScan() {
+        startScan(continuous: false)
+    }
+
+    func startMonitoring() {
+        startScan(continuous: true)
+    }
+
+    private func startScan(continuous: Bool) {
         guard canStartLiveScan, let selected, let endpoints = candidateEndpoints else { return }
         let session: FIXDLiveSession
         do {
@@ -361,17 +369,65 @@ private final class BluetoothBridge: NSObject, ObservableObject {
         isLiveScanRunning = true
         liveScanTask = Task { @MainActor [weak self] in
             do {
-                let result = try await FIXDReadScan.run(using: session) { message in
+                let connection = try await FIXDReadScan.connect(using: session) { message in
                     self?.liveScanStatus = message
                 }
                 guard let self, self.liveSession === session, !Task.isCancelled else { return }
-                self.liveScanResult = result
-                self.finishLiveScan("Read-only scan complete.")
+                self.vehicle.markResponders(connection.responders)
+                self.liveScanStatus = "Reading supported vehicle data…"
+                let first = try await FIXDReadScan.readCurrentData(using: session, connection: connection)
+                guard self.liveSession === session, !Task.isCancelled else { return }
+                self.publish(first, connection: connection)
+                if continuous {
+                    guard !first.readings.isEmpty else {
+                        self.finishLiveScan("The ECU responded but returned no supported live readings.")
+                        return
+                    }
+                    self.vehicle.setMonitoring(true)
+                    self.liveScanStatus = "Live readings active in Dashboard and Signals."
+                    while !Task.isCancelled {
+                        try await Task.sleep(for: .seconds(2))
+                        let frame = try await FIXDReadScan.readCurrentData(using: session, connection: connection)
+                        guard self.liveSession === session, !Task.isCancelled else { return }
+                        guard !frame.readings.isEmpty else {
+                            self.finishLiveScan("The vehicle stopped returning supported live readings.")
+                            return
+                        }
+                        self.publish(frame, connection: connection)
+                    }
+                } else {
+                    self.liveScanStatus = "Reading stored, pending, and permanent trouble codes…"
+                    let codes = try await FIXDReadScan.readTroubleCodes(using: session)
+                    guard self.liveSession === session, !Task.isCancelled else { return }
+                    self.vehicle.recordTroubleCodes(codes)
+                    self.liveScanResult = Self.snapshot(first, connection: connection, troubleCodes: codes)
+                    self.finishLiveScan("Read-only scan complete. Dashboard and Signals have been updated.")
+                }
             } catch {
                 guard let self, self.liveSession === session, !Task.isCancelled else { return }
-                self.finishLiveScan("Live scan stopped. " + error.localizedDescription)
+                self.finishLiveScan("Vehicle readings stopped. " + error.localizedDescription)
             }
         }
+    }
+
+    private func publish(_ frame: FIXDReadScan.CurrentDataFrame, connection: FIXDReadScan.Connection) {
+        vehicle.record(readings: frame.readings, capturedAt: frame.capturedAt)
+        liveScanResult = Self.snapshot(frame, connection: connection, troubleCodes: vehicle.troubleCodes)
+    }
+
+    private static func snapshot(
+        _ frame: FIXDReadScan.CurrentDataFrame,
+        connection: FIXDReadScan.Connection,
+        troubleCodes: [FIXDScanSnapshot.TroubleCodes]
+    ) -> FIXDScanSnapshot {
+        FIXDScanSnapshot(
+            capturedAt: frame.capturedAt,
+            vehicleProtocol: connection.vehicleProtocol,
+            responders: connection.responders,
+            readings: frame.readings,
+            troubleCodes: troubleCodes,
+            unavailableReadings: frame.unavailableReadings
+        )
     }
 
     private func finishLiveScan(_ message: String) {
@@ -380,7 +436,8 @@ private final class BluetoothBridge: NSObject, ObservableObject {
         liveSession = nil
         isLiveScanRunning = false
         liveScanStatus = message
-        disconnect(because: "Disconnected after the read-only scan.")
+        vehicle.setMonitoring(false)
+        disconnect(because: "Disconnected after the read-only session.")
     }
 
     private func stopLiveScan() {
@@ -389,7 +446,8 @@ private final class BluetoothBridge: NSObject, ObservableObject {
         liveScanTask = nil
         self.liveSession = nil
         isLiveScanRunning = false
-        liveScanStatus = "Live scan interrupted. Reconnect to try again."
+        liveScanStatus = "Readings stopped. Reconnect to scan again."
+        vehicle.setMonitoring(false)
         liveSession.invalidate()
     }
 
@@ -430,6 +488,7 @@ private final class BluetoothBridge: NSObject, ObservableObject {
             finishScan("Select an adapter to inspect.")
         }
 
+        vehicle.clearForNewAdapter()
         selected = peripheral
         peripheral.delegate = self
         report = DiscoveryReport(
@@ -482,6 +541,7 @@ private final class BluetoothBridge: NSObject, ObservableObject {
         }
         disconnectMessage = message
         phase = .disconnecting
+        vehicle.setAdapterConnected(false)
         status = "Disconnecting…"
         central.cancelPeripheralConnection(peripheral)
     }
@@ -491,6 +551,7 @@ private final class BluetoothBridge: NSObject, ObservableObject {
         deadline?.cancel()
         selected?.delegate = nil
         selected = nil
+        vehicle.setAdapterConnected(false)
         pendingServices.removeAll()
         phase = .idle
         status = message
@@ -511,7 +572,9 @@ private final class BluetoothBridge: NSObject, ObservableObject {
         report?.outcome = result
         phase = .ready
         status = result
-        if candidateEndpoints == nil {
+        let matchedAdapter = candidateEndpoints != nil
+        vehicle.setAdapterConnected(matchedAdapter)
+        if !matchedAdapter {
             liveScanStatus = "Live scanning needs one complete FIXD or FIXD2 Bluetooth profile."
         }
     }

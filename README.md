@@ -2,7 +2,9 @@
 
 An independent native iOS diagnostics project built with SwiftUI and CoreBluetooth.
 
-The application includes an offline demo dashboard, configurable gauges, session logging and CSV export, a searchable 67-signal list, and a Bluetooth inspector. The module browser groups PCM, automatic transmission, SH-AWD, ABS/VSA, and other Acura MDX diagnostics. The service functions screen lists PCM reset, relearns, and calibrations with their availability. Demo telemetry is simulated. The FIXD scanner is designed to read ECU-reported standard readings and stored, pending, and permanent trouble codes over a compatible adapter. The first real adapter/vehicle exchange remains unverified. Acura-specific PIDs and state-changing service functions remain unavailable.
+Garage Signal opens in Vehicle mode. On iPhone, a matched FIXD adapter can start a read-only scan or poll standard OBD-II readings from responding ECUs. The Dashboard and Signals show the latest vehicle readings by ECU, with timestamps and availability states. Demo mode shows simulated readings, and Drive Logs records and exports demo sessions.
+
+The module browser gives the engine/PCM, automatic transmission, SH-AWD, ABS/VSA, and other systems separate status pages. The engine page shows returned standard readings and trouble codes. The FIXD Bluetooth profile has been observed on an iPhone. An end-to-end vehicle exchange and Acura-specific commands still require hardware validation. Acura-specific readings and service functions remain unavailable.
 
 DiagnosticsCore decodes complete SAE J1979 service 01 payloads. Its replay tests exercise RPM, vehicle speed, coolant temperature, supported-PID bitmaps, ignition advance, and the four standard fuel-trim channels.
 

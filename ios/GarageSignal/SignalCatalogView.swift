@@ -3,6 +3,9 @@ import SwiftUI
 @MainActor
 struct SignalCatalogView: View {
     @ObservedObject var telemetry: DemoTelemetry
+    @ObservedObject var vehicle: VehicleTelemetry
+
+    @AppStorage("telemetry.source.v1") private var source: TelemetrySource = .vehicle
     @State private var query = ""
 
     private var matchingGroups: [SignalGroup] {
@@ -24,26 +27,27 @@ struct SignalCatalogView: View {
         List {
             if !groups.isEmpty {
                 Section {
-                    Label {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("2011 Acura MDX · 3.7L SH-AWD")
-                                .font(.subheadline.weight(.semibold))
-                            Text("Demo rows use simulated data. Vehicle signals await adapter and ECU verification.")
-                                .font(.footnote)
-                                .foregroundStyle(GarageTheme.mutedText)
+                    VStack(alignment: .leading, spacing: 10) {
+                        TelemetrySourcePicker(source: $source)
+                        Text("2011 Acura MDX · 3.7L SH-AWD profile")
+                            .font(.subheadline.weight(.semibold))
+                        if source == .demo {
+                            SourceLabel(title: "Simulated telemetry")
+                        } else {
+                            VehicleTelemetryStatus(
+                                isMonitoring: vehicle.isMonitoring,
+                                lastUpdated: vehicle.lastUpdated
+                            )
                         }
-                    } icon: {
-                        Image(systemName: "info.circle")
-                            .foregroundStyle(GarageTheme.accent)
-                            .accessibilityHidden(true)
                     }
+                    .padding(.vertical, 4)
                     .listRowBackground(GarageTheme.surface)
                 }
             }
             ForEach(groups) { group in
                 Section(group.title) {
                     ForEach(group.signals) { signal in
-                        SignalRow(signal: signal, sample: telemetry.samples.last)
+                        SignalRow(signal: signal, values: values(for: signal))
                             .listRowBackground(GarageTheme.surface)
                     }
                 }
@@ -60,11 +64,31 @@ struct SignalCatalogView: View {
         .navigationTitle("Signals")
         .searchable(text: $query, placement: .navigationBarDrawer(displayMode: .always), prompt: "Find a signal")
     }
+
+    private func values(for signal: SignalDefinition) -> [SignalValue] {
+        guard let metric = signal.metric else { return [] }
+        switch source {
+        case .demo:
+            guard let sample = telemetry.samples.last else { return [] }
+            return [SignalValue(text: metric.display(sample[metric]), source: "Demo")]
+        case .vehicle:
+            return vehicle.readings(for: metric).map {
+                SignalValue(text: metric.display($0.value), source: "ECU \($0.ecu)")
+            }
+        }
+    }
+}
+
+private struct SignalValue: Identifiable {
+    let text: String
+    let source: String
+
+    var id: String { source }
 }
 
 private struct SignalRow: View {
     let signal: SignalDefinition
-    let sample: DemoSample?
+    let values: [SignalValue]
 
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
@@ -87,14 +111,8 @@ private struct SignalRow: View {
             if !stacked {
                 Spacer(minLength: 3)
             }
-            VStack(alignment: stacked ? .leading : .trailing, spacing: 3) {
-                if let metric = signal.demoMetric, let sample {
-                    Text("\(metric.display(sample[metric])) \(signal.unit)")
-                        .font(.subheadline.monospacedDigit())
-                    Text("Demo")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(GarageTheme.accent)
-                } else {
+            VStack(alignment: stacked ? .leading : .trailing, spacing: 6) {
+                if values.isEmpty {
                     Text("Unavailable")
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(GarageTheme.mutedText)
@@ -102,6 +120,15 @@ private struct SignalRow: View {
                         Text(signal.unit)
                             .font(.caption2)
                             .foregroundStyle(GarageTheme.mutedText)
+                    }
+                }
+                ForEach(values) { reading in
+                    VStack(alignment: stacked ? .leading : .trailing, spacing: 3) {
+                        Text("\(reading.text) \(signal.unit)")
+                            .font(.subheadline.monospacedDigit())
+                        Text(reading.source)
+                            .font(.caption.monospaced())
+                            .foregroundStyle(GarageTheme.accent)
                     }
                 }
             }
@@ -115,7 +142,7 @@ private struct SignalDefinition: Identifiable {
     let title: String
     let unit: String
     let keywords: String
-    let demoMetric: DemoMetric?
+    let metric: DemoMetric?
     let note: String?
 
     var id: String { title }
@@ -124,7 +151,7 @@ private struct SignalDefinition: Identifiable {
         self.title = title
         self.unit = unit
         self.keywords = keywords
-        demoMetric = nil
+        metric = nil
         self.note = note
     }
 
@@ -132,7 +159,7 @@ private struct SignalDefinition: Identifiable {
         title = metric.title
         unit = metric.unit
         self.keywords = keywords
-        demoMetric = metric
+        self.metric = metric
         note = nil
     }
 }

@@ -3,6 +3,11 @@ import SwiftUI
 @MainActor
 struct DashboardView: View {
     @ObservedObject var telemetry: DemoTelemetry
+    @ObservedObject var vehicle: VehicleTelemetry
+    let onConnect: () -> Void
+    let onStop: () -> Void
+
+    @AppStorage("telemetry.source.v1") private var source: TelemetrySource = .vehicle
     @AppStorage("dashboard.metrics.v1") private var storedMetrics =
         DemoMetric.dashboardDefaults.map(\.rawValue).joined(separator: ",")
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
@@ -26,20 +31,41 @@ struct DashboardView: View {
     var body: some View {
         GarageScreen {
             VStack(alignment: .leading, spacing: 5) {
-                SourceLabel(title: "Simulated telemetry")
                 Text("2011 Acura MDX")
                     .font(.title2.bold())
-                Text("3.7L · SH-AWD")
+                Text("3.7L · SH-AWD profile")
                     .font(.subheadline)
                     .foregroundStyle(GarageTheme.mutedText)
             }
+            GaragePanel {
+                VStack(alignment: .leading, spacing: 12) {
+                    TelemetrySourcePicker(source: $source)
+                    if source == .demo {
+                        SourceLabel(title: "Simulated telemetry")
+                    } else {
+                        VehicleTelemetryStatus(
+                            isMonitoring: vehicle.isMonitoring,
+                            lastUpdated: vehicle.lastUpdated
+                        )
+                        if vehicle.isMonitoring {
+                            Button("Stop monitoring", systemImage: "stop.circle", action: onStop)
+                                .buttonStyle(.bordered)
+                                .accessibilityIdentifier("stop-vehicle-monitoring")
+                        } else {
+                            Button("Connect to vehicle", systemImage: "antenna.radiowaves.left.and.right", action: onConnect)
+                                .buttonStyle(.borderedProminent)
+                                .accessibilityIdentifier("connect-vehicle")
+                        }
+                    }
+                }
+            }
             if let primary = metrics.first {
-                MetricCard(metric: primary, samples: telemetry.samples, prominent: true)
+                gauge(primary, prominent: true)
             }
             if metrics.count > 1 {
                 LazyVGrid(columns: gaugeColumns, spacing: 10) {
                     ForEach(metrics.dropFirst()) { metric in
-                        MetricCard(metric: metric, samples: telemetry.samples)
+                        gauge(metric)
                     }
                 }
             }
@@ -61,40 +87,142 @@ struct DashboardView: View {
             }
         }
     }
+
+    private func gauge(_ metric: DemoMetric, prominent: Bool = false) -> some View {
+        let channels: [MetricChannel]
+        switch source {
+        case .demo:
+            let history = telemetry.samples.map { $0[metric] }
+            channels = history.last.map { [MetricChannel(ecu: nil, value: $0, history: history)] } ?? []
+        case .vehicle:
+            channels = vehicle.readings(for: metric).map { reading in
+                MetricChannel(
+                    ecu: reading.ecu,
+                    value: reading.value,
+                    history: vehicle.history(for: metric, ecu: reading.ecu)
+                )
+            }
+        }
+        return MetricCard(metric: metric, channels: channels, prominent: prominent)
+    }
+}
+
+struct TelemetrySourcePicker: View {
+    @Binding var source: TelemetrySource
+
+    var body: some View {
+        Picker("Telemetry source", selection: $source) {
+            Text("Vehicle").tag(TelemetrySource.vehicle)
+            Text("Demo").tag(TelemetrySource.demo)
+        }
+        .pickerStyle(.segmented)
+        .accessibilityIdentifier("telemetry-source")
+    }
+}
+
+struct VehicleTelemetryStatus: View {
+    let isMonitoring: Bool
+    let lastUpdated: Date?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            if isMonitoring {
+                SourceLabel(title: "Vehicle monitoring active")
+            } else {
+                Label("Vehicle monitoring inactive", systemImage: "antenna.radiowaves.left.and.right")
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(GarageTheme.mutedText)
+            }
+            if let lastUpdated {
+                let timestamp = lastUpdated.formatted(.dateTime.month(.abbreviated).day().hour().minute().second())
+                Text(isMonitoring ? "Latest reading \(timestamp)" : "Last vehicle scan \(timestamp)")
+                    .font(.caption)
+                    .foregroundStyle(GarageTheme.mutedText)
+            } else {
+                Text(isMonitoring ? "Waiting for vehicle readings." : "Connect the adapter and start a read-only scan.")
+                    .font(.caption)
+                    .foregroundStyle(GarageTheme.mutedText)
+            }
+        }
+    }
+}
+
+private struct MetricChannel: Identifiable {
+    let ecu: String?
+    let value: Double
+    let history: [Double]
+
+    var id: String { ecu ?? "demo" }
 }
 
 private struct MetricCard: View {
     let metric: DemoMetric
-    let samples: [DemoSample]
+    let channels: [MetricChannel]
     var prominent = false
 
-    var body: some View {
-        let readings = samples.map { $0[metric] }
-        let display = readings.last.map(metric.display) ?? "—"
+    private var accessibilityReading: String {
+        guard !channels.isEmpty else { return "Unavailable" }
+        return channels.map { channel in
+            let label = channel.ecu.map { "ECU \($0)" } ?? "Simulated"
+            return "\(label), \(metric.display(channel.value)) \(metric.unit)"
+        }.joined(separator: ". ")
+    }
 
+    private var chartRange: ClosedRange<Double> {
+        let history = channels.flatMap(\.history)
+        let low = min(metric.displayRange.lowerBound, history.min() ?? metric.displayRange.lowerBound)
+        let high = max(metric.displayRange.upperBound, history.max() ?? metric.displayRange.upperBound)
+        return low...high
+    }
+
+    var body: some View {
         GaragePanel {
             VStack(alignment: .leading, spacing: prominent ? 12 : 9) {
                 Label(metric.title, systemImage: metric.icon)
                     .font(prominent ? .subheadline.weight(.semibold) : .footnote.weight(.medium))
                     .foregroundStyle(GarageTheme.mutedText)
-                ViewThatFits(in: .horizontal) {
-                    HStack(alignment: .firstTextBaseline, spacing: 5) {
-                        valueText(display)
-                        unitText
+                if channels.isEmpty {
+                    Text("Unavailable")
+                        .font(.subheadline.weight(.medium))
+                        .foregroundStyle(GarageTheme.mutedText)
+                }
+                ForEach(channels) { channel in
+                    if channel.id != channels.first?.id {
+                        Divider()
                     }
-                    VStack(alignment: .leading, spacing: 2) {
-                        valueText(display)
-                        unitText
+                    VStack(alignment: .leading, spacing: 6) {
+                        if let ecu = channel.ecu {
+                            Text("ECU \(ecu)")
+                                .font(.caption2.monospaced())
+                                .foregroundStyle(GarageTheme.mutedText)
+                        }
+                        value(channel.value)
+                        if channel.history.count > 1 {
+                            TrendPlot(readings: channel.history, range: chartRange)
+                                .frame(height: prominent ? 78 : 31)
+                                .accessibilityHidden(true)
+                        }
                     }
                 }
-                TrendPlot(readings: readings, range: metric.displayRange)
-                    .frame(height: prominent ? 78 : 31)
-                    .accessibilityHidden(true)
             }
         }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(metric.title)
-        .accessibilityValue("Simulated, \(display) \(metric.unit)")
+        .accessibilityValue(accessibilityReading)
+    }
+
+    private func value(_ reading: Double) -> some View {
+        let display = metric.display(reading)
+        return ViewThatFits(in: .horizontal) {
+            HStack(alignment: .firstTextBaseline, spacing: 5) {
+                valueText(display)
+                unitText
+            }
+            VStack(alignment: .leading, spacing: 2) {
+                valueText(display)
+                unitText
+            }
+        }
     }
 
     private func valueText(_ display: String) -> some View {

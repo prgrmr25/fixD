@@ -4,11 +4,12 @@ import Foundation
 struct FIXDScanSnapshot {
     struct Reading: Identifiable {
         let ecu: String
+        let pid: CurrentDataPID
         let title: String
         let value: Double
         let unit: String
 
-        var id: String { ecu + ":" + title }
+        var id: String { ecu + ":" + String(pid.rawValue) }
     }
 
     struct TroubleCodes: Identifiable {
@@ -35,9 +36,24 @@ struct FIXDScanSnapshot {
 
 @MainActor
 enum FIXDReadScan {
+    struct Connection {
+        let vehicleProtocol: String
+        fileprivate let sessionID: ObjectIdentifier
+        fileprivate let supportedPIDsByECU: [String: Set<UInt8>]
+
+        var responders: [String] { supportedPIDsByECU.keys.sorted() }
+    }
+
+    struct CurrentDataFrame {
+        let capturedAt: Date
+        let readings: [FIXDScanSnapshot.Reading]
+        let unavailableReadings: [String]
+    }
+
     enum Failure: LocalizedError {
         case unexpectedProtocol
         case noSupportedPIDReply
+        case mismatchedConnection
 
         var errorDescription: String? {
             switch self {
@@ -45,6 +61,8 @@ enum FIXDReadScan {
                 return "This beta supports confirmed ISO 15765-4 CAN sessions. The adapter reported another protocol."
             case .noSupportedPIDReply:
                 return "No vehicle ECU returned a supported-PID bitmap. Check ignition and adapter connection."
+            case .mismatchedConnection:
+                return "Vehicle data must be read through the adapter session that discovered it."
             }
         }
     }
@@ -53,6 +71,26 @@ enum FIXDReadScan {
         using session: FIXDLiveSession,
         progress: (String) -> Void
     ) async throws -> FIXDScanSnapshot {
+        let connection = try await connect(using: session, progress: progress)
+        progress("Reading vehicle data supported by the responding ECUs…")
+        let frame = try await readCurrentData(using: session, connection: connection)
+        progress("Reading stored, pending and permanent trouble codes…")
+        let codeGroups = try await readTroubleCodes(using: session)
+        return FIXDScanSnapshot(
+            capturedAt: frame.capturedAt,
+            vehicleProtocol: connection.vehicleProtocol,
+            responders: connection.responders,
+            readings: frame.readings,
+            troubleCodes: codeGroups,
+            unavailableReadings: frame.unavailableReadings
+        )
+    }
+
+    /// Configure the adapter once and identify the PIDs advertised by each ECU.
+    static func connect(
+        using session: FIXDLiveSession,
+        progress: (String) -> Void
+    ) async throws -> Connection {
         progress("Preparing the selected FIXD adapter…")
         try await session.start()
 
@@ -75,12 +113,26 @@ enum FIXDReadScan {
         }
         guard !supportByECU.isEmpty else { throw Failure.noSupportedPIDReply }
 
-        progress("Reading vehicle data supported by the responding ECUs…")
+        return Connection(
+            vehicleProtocol: protocolName,
+            sessionID: ObjectIdentifier(session),
+            supportedPIDsByECU: supportByECU
+        )
+    }
+
+    /// Request a new set of readings without repeating adapter setup or reading DTCs.
+    static func readCurrentData(
+        using session: FIXDLiveSession,
+        connection: Connection
+    ) async throws -> CurrentDataFrame {
+        guard connection.sessionID == ObjectIdentifier(session) else { throw Failure.mismatchedConnection }
         var readings: [FIXDScanSnapshot.Reading] = []
         var unavailable: [String] = []
         for (pid, title) in measurements {
             try Task.checkCancellation()
-            let expected = supportByECU.filter { $0.value.contains(pid.rawValue) }
+            let expected = Set(connection.supportedPIDsByECU.compactMap { ecu, supported -> String? in
+                supported.contains(pid.rawValue) ? ecu : nil
+            })
             guard !expected.isEmpty else {
                 unavailable.append(title)
                 continue
@@ -91,17 +143,21 @@ enum FIXDReadScan {
             var observed = Set<String>()
             for answer in try optionalAnswers(response, for: request) {
                 let ecu = answer.responder.hexIdentifier
-                guard expected[ecu] != nil,
-                      case .currentData(.measurement(let value, let unit)) = answer.outcome else { continue }
-                readings.append(.init(ecu: ecu, title: title, value: value, unit: unitName(unit)))
+                guard expected.contains(ecu),
+                      case .currentData(.measurement(let value, let unit)) = answer.outcome
+                else { continue }
+                readings.append(.init(ecu: ecu, pid: pid, title: title, value: value, unit: unitName(unit)))
                 observed.insert(ecu)
             }
-            unavailable.append(contentsOf: expected.keys.filter { !observed.contains($0) }.sorted().map {
+            unavailable.append(contentsOf: expected.subtracting(observed).sorted().map {
                 "\(title) · ECU \($0)"
             })
         }
+        return CurrentDataFrame(capturedAt: .now, readings: readings, unavailableReadings: unavailable)
+    }
 
-        progress("Reading stored, pending and permanent trouble codes…")
+    /// Capture an on-demand DTC snapshot independently from live polling.
+    static func readTroubleCodes(using session: FIXDLiveSession) async throws -> [FIXDScanSnapshot.TroubleCodes] {
         var codeGroups: [FIXDScanSnapshot.TroubleCodes] = []
         for (category, title) in codeCategories {
             try Task.checkCancellation()
@@ -122,14 +178,7 @@ enum FIXDReadScan {
             codeGroups.append(.init(title: title, ecus: ecus, status: ecus.isEmpty ? "No data returned." : nil))
         }
 
-        return FIXDScanSnapshot(
-            capturedAt: .now,
-            vehicleProtocol: protocolName,
-            responders: supportByECU.keys.sorted(),
-            readings: readings,
-            troubleCodes: codeGroups,
-            unavailableReadings: unavailable
-        )
+        return codeGroups
     }
 
     private static func optionalAnswers(
@@ -174,6 +223,8 @@ enum FIXDReadScan {
         (.engineSpeed, "Engine RPM"),
         (.vehicleSpeed, "Vehicle speed"),
         (.coolantTemperature, "Coolant temperature"),
+        (.calculatedEngineLoad, "Calculated engine load"),
+        (.throttlePosition, "Throttle position"),
         (.ignitionAdvance, "Ignition advance"),
         (.shortTermFuelTrimBank1, "Short-term fuel trim, bank 1"),
         (.longTermFuelTrimBank1, "Long-term fuel trim, bank 1"),
