@@ -36,6 +36,9 @@ final class GarageSignalUITests: XCTestCase {
         app.buttons["shawd"].tap()
         XCTAssertTrue(app.navigationBars["SH-AWD"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["Vehicle support unverified"].exists)
+        XCTAssertTrue(app.buttons["connect-module-fixd"].exists)
+        XCTAssertFalse(app.buttons["scan-module"].exists)
+        XCTAssertFalse(app.buttons["share-module-scan"].exists)
 
         app.navigationBars["SH-AWD"].buttons.firstMatch.tap()
         app.navigationBars["Vehicle modules"].buttons.firstMatch.tap()

@@ -1,3 +1,4 @@
+import DiagnosticsCore
 import SwiftUI
 
 private struct VehicleModule: Identifiable {
@@ -7,6 +8,7 @@ private struct VehicleModule: Identifiable {
     let detail: String
     let readings: [String]
     let serviceFunctions: [String]
+    var probe: HondaModuleProbe? = nil
 
     static let powertrain: [VehicleModule] = [
         .init(
@@ -17,7 +19,8 @@ private struct VehicleModule: Identifiable {
                 "Honda/Acura knock correction", "Manufacturer-specific DTCs",
                 "Freeze frame and monitor readiness"
             ],
-            serviceFunctions: ["PCM learned-value reset", "Throttle position learn", "Idle learn"]
+            serviceFunctions: ["PCM learned-value reset", "Throttle position learn", "Idle learn"],
+            probe: .powertrain
         ),
         .init(
             id: "transmission", name: "Automatic transmission", icon: "gearshape.2",
@@ -27,7 +30,8 @@ private struct VehicleModule: Identifiable {
                 "Torque converter clutch state", "Torque converter slip",
                 "Transmission diagnostics and calibration identification"
             ],
-            serviceFunctions: ["Transmission adaptation or relearn, where supported"]
+            serviceFunctions: ["Transmission adaptation or relearn, where supported"],
+            probe: .transmission
         ),
         .init(
             id: "shawd", name: "SH-AWD", icon: "car.side",
@@ -37,7 +41,8 @@ private struct VehicleModule: Identifiable {
                 "Left and right rear clutch command or current, if exposed",
                 "Torque distribution data, if exposed"
             ],
-            serviceFunctions: ["OEM SH-AWD function tests, where supported"]
+            serviceFunctions: ["OEM SH-AWD function tests, where supported"],
+            probe: .shawd
         ),
     ]
 
@@ -46,18 +51,22 @@ private struct VehicleModule: Identifiable {
             id: "vsa", name: "ABS and VSA", icon: "steeringwheel",
             detail: "Braking and vehicle stability",
             readings: ["Chassis DTCs", "Four wheel speeds", "Steering angle and yaw data, if exposed"],
-            serviceFunctions: ["VSA sensor calibration, where supported"]
+            serviceFunctions: ["VSA sensor calibration, where supported"],
+            probe: .absVSA
         ),
         .init(
             id: "srs", name: "SRS", icon: "person.crop.circle",
             detail: "Airbag and supplemental restraint diagnostics",
-            readings: ["SRS DTCs", "Control unit identification, if exposed"], serviceFunctions: []
+            readings: ["SRS DTCs", "Control unit identification, if exposed"],
+            serviceFunctions: [],
+            probe: .srs
         ),
         .init(
             id: "tpms", name: "TPMS", icon: "exclamationmark.circle",
             detail: "Tire pressure monitoring",
             readings: ["TPMS DTCs", "Per-wheel pressure and sensor state, if exposed"],
-            serviceFunctions: ["Sensor registration, where supported"]
+            serviceFunctions: ["Sensor registration, where supported"],
+            probe: .tpms
         ),
         .init(
             id: "body", name: "Body and multiplex", icon: "car.rear",
@@ -66,7 +75,8 @@ private struct VehicleModule: Identifiable {
                 "Body DTCs", "Battery voltage and body switch states, if exposed",
                 "Instrument cluster identification, if exposed", "Parking assistance status, if equipped"
             ],
-            serviceFunctions: []
+            serviceFunctions: [],
+            probe: .instrumentCluster
         ),
         .init(
             id: "climate", name: "Climate control", icon: "thermometer.medium",
@@ -79,6 +89,8 @@ private struct VehicleModule: Identifiable {
 
 struct ModuleCatalogView: View {
     @ObservedObject var vehicle: VehicleTelemetry
+    @ObservedObject var bridge: BluetoothBridge
+    let onOpenAdapter: () -> Void
 
     var body: some View {
         GarageScreen {
@@ -102,7 +114,12 @@ struct ModuleCatalogView: View {
                             Divider()
                         }
                         NavigationLink {
-                            ModuleDetailsView(module: module, vehicle: vehicle)
+                            ModuleDetailsView(
+                                module: module,
+                                vehicle: vehicle,
+                                bridge: bridge,
+                                onOpenAdapter: onOpenAdapter
+                            )
                         } label: {
                             Label {
                                 VStack(alignment: .leading, spacing: 4) {
@@ -163,6 +180,8 @@ private struct VehicleLinkPanel: View {
 private struct ModuleDetailsView: View {
     let module: VehicleModule
     @ObservedObject var vehicle: VehicleTelemetry
+    @ObservedObject var bridge: BluetoothBridge
+    let onOpenAdapter: () -> Void
 
     private var isEngine: Bool { module.id == "pcm" }
 
@@ -190,6 +209,10 @@ private struct ModuleDetailsView: View {
                 }
             }
 
+            if let probe = module.probe {
+                moduleScan(probe)
+            }
+
             if isEngine {
                 engineReadings
                 engineTroubleCodes
@@ -203,6 +226,68 @@ private struct ModuleDetailsView: View {
         }
         .navigationTitle(module.name)
         .navigationBarTitleDisplayMode(.inline)
+    }
+
+    private func moduleScan(_ probe: HondaModuleProbe) -> some View {
+        section("\(probe.title) · read-only scan") {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Checks for a response to a targeted read-only request. Module identity and condition require separate verification.")
+                    .font(.subheadline)
+                    .foregroundStyle(GarageTheme.mutedText)
+                Text("Park the vehicle and turn the ignition on before scanning.")
+                    .font(.caption)
+                    .foregroundStyle(GarageTheme.mutedText)
+
+                if vehicle.isAdapterConnected {
+                    Button("Scan module", systemImage: "magnifyingglass") {
+                        bridge.scanModule(probe)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(!bridge.canStartModuleProbe)
+                    .accessibilityIdentifier("scan-module")
+                } else {
+                    Button("Connect to FIXD", systemImage: "antenna.radiowaves.left.and.right", action: onOpenAdapter)
+                        .buttonStyle(.borderedProminent)
+                        .accessibilityIdentifier("connect-module-fixd")
+                }
+
+                if let status = bridge.moduleProbeStatus[probe] {
+                    Text(status)
+                        .font(.subheadline.weight(.medium))
+                        .accessibilityIdentifier("module-scan-status")
+                }
+                if vehicle.isAdapterConnected && !bridge.canStartModuleProbe && vehicle.isMonitoring {
+                    Text("Stop live readings before scanning this module.")
+                        .font(.caption)
+                        .foregroundStyle(GarageTheme.mutedText)
+                }
+
+                if let result = bridge.moduleProbeResult[probe] {
+                    Divider()
+                    VStack(alignment: .leading, spacing: 8) {
+                        LabeledContent("Responder", value: result.responder)
+                        LabeledContent("Data identifier", value: result.did)
+                        LabeledContent("Data bytes", value: result.byteCount.formatted())
+                        DisclosureGroup("Raw response") {
+                            Text(verbatim: result.rawHex)
+                                .font(.caption.monospaced())
+                                .fixedSize(horizontal: false, vertical: true)
+                                .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(.top, 4)
+                        }
+                    }
+                    .font(.subheadline)
+                    .accessibilityIdentifier("module-scan-result")
+
+                    ShareLink(item: result.report, subject: Text("Honda/Acura module scan report")) {
+                        Label("Share Module Scan", systemImage: "square.and.arrow.up")
+                    }
+                    .buttonStyle(.bordered)
+                    .accessibilityIdentifier("share-module-scan")
+                }
+            }
+        }
     }
 
     private var engineReadings: some View {

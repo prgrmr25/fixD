@@ -17,6 +17,7 @@ final class FIXDLiveSession {
         case timeout(String)
         case invalidResponse(String)
         case rejectedSetup(String)
+        case moduleAddressRequired
         case cancelled
 
         var errorDescription: String? {
@@ -32,6 +33,7 @@ final class FIXDLiveSession {
             case .timeout(let command): "The adapter timed out while handling \(command). Reconnect to try again."
             case .invalidResponse(let reason): "Invalid adapter reply. \(reason)"
             case .rejectedSetup(let command): "The adapter did not accept \(command)."
+            case .moduleAddressRequired: "The Honda read needs a specific module address."
             case .cancelled: "The adapter session was cancelled."
             }
         }
@@ -54,8 +56,8 @@ final class FIXDLiveSession {
         case autoProtocol = "ATSP0"
         case protocolNumber = "ATDPN"
 
-        static let setup: [Self] = [
-            .reset, .defaults, .echoOff, .linefeedsOff, .spacesOff, .headersOn, .autoProtocol,
+        static let standardConfiguration: [Self] = [
+            .defaults, .echoOff, .linefeedsOff, .spacesOff, .headersOn, .autoProtocol,
         ]
 
         var bytes: [UInt8] { Array((rawValue + "\r").utf8) }
@@ -143,11 +145,7 @@ final class FIXDLiveSession {
 
         do {
             try await subscribe()
-            for command in AdapterCommand.setup {
-                let timeout: Duration = command == .reset ? .seconds(8) : .seconds(5)
-                let reply = try await exchange(command.bytes, timeout: timeout)
-                guard command.accepted(reply) else { throw Failure.rejectedSetup(command.rawValue) }
-            }
+            try await configureAdapter([.reset] + AdapterCommand.standardConfiguration)
             try Task.checkCancellation()
             guard case .configuring = phase else { throw terminalFailure ?? Failure.notReady }
             phase = .ready
@@ -160,6 +158,7 @@ final class FIXDLiveSession {
     /// Returns the raw prompt-delimited reply for a fixed read-only request.
     func read(_ request: DiagnosticRequest) async throws -> String {
         guard case .ready = phase else { throw terminalFailure ?? Failure.notReady }
+        if case .hondaData = request { throw Failure.moduleAddressRequired }
         let timeout: Duration
         if case .currentData(.supported01Through20) = request {
             timeout = .seconds(20)
@@ -167,6 +166,41 @@ final class FIXDLiveSession {
             timeout = .seconds(10)
         }
         return try await exchange(ASCIIPromptFramer.encode(request), timeout: timeout)
+    }
+
+    /// Selects one allowlisted 29-bit module address, sends one read, then restores adapter defaults.
+    func readModule(_ probe: HondaModuleProbe) async throws -> String {
+        guard case .ready = phase else { throw terminalFailure ?? Failure.notReady }
+        phase = .configuring
+
+        do {
+            // ATZ/ATD select the default 0x18 priority. ATSH supplies the remaining three bytes.
+            let header = "ATSH" + String(probe.requestCANID.suffix(6))
+            let headerReply = try await exchange(Array((header + "\r").utf8), timeout: .seconds(5))
+            let status = headerReply.split(whereSeparator: \.isNewline).map {
+                $0.trimmingCharacters(in: .whitespaces).uppercased()
+            }.filter { !$0.isEmpty && $0 != header }
+            guard status == ["OK"] else { throw Failure.rejectedSetup(header) }
+
+            let reply = try await exchange(ASCIIPromptFramer.encode(.hondaData(probe)), timeout: .seconds(10))
+            try await configureAdapter(AdapterCommand.standardConfiguration)
+            try Task.checkCancellation()
+            guard case .configuring = phase else { throw terminalFailure ?? Failure.notReady }
+            phase = .ready
+            return reply
+        } catch {
+            // A timed-out request or failed restore must not leave a usable targeted header.
+            invalidate(because: error as? Failure ?? .cancelled)
+            throw error
+        }
+    }
+
+    private func configureAdapter(_ commands: [AdapterCommand]) async throws {
+        for command in commands {
+            let timeout: Duration = command == .reset ? .seconds(8) : .seconds(5)
+            let reply = try await exchange(command.bytes, timeout: timeout)
+            guard command.accepted(reply) else { throw Failure.rejectedSetup(command.rawValue) }
+        }
     }
 
     func readAdapterProtocol() async throws -> String {

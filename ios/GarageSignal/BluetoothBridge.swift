@@ -1,4 +1,5 @@
 import CoreBluetooth
+import DiagnosticsCore
 import Foundation
 import SwiftUI
 
@@ -316,8 +317,12 @@ final class BluetoothBridge: NSObject, ObservableObject {
     @Published fileprivate var report: DiscoveryReport?
     @Published private(set) var liveScanStatus: String?
     @Published private(set) var liveScanResult: FIXDScanSnapshot?
-    private enum ScanMode {
+    @Published private(set) var moduleProbeStatus: [HondaModuleProbe: String] = [:]
+    @Published private(set) var moduleProbeResult: [HondaModuleProbe: HondaModuleProbeResult] = [:]
+
+    private enum ScanMode: Equatable {
         case snapshot, continuous
+        case module(HondaModuleProbe)
     }
 
     @Published private var scanMode: ScanMode?
@@ -348,6 +353,13 @@ final class BluetoothBridge: NSObject, ObservableObject {
 
     var canStartLiveScan: Bool {
         phase == .ready && !isLiveScanRunning && candidateEndpoints != nil
+    }
+
+    var canStartModuleProbe: Bool { canStartLiveScan }
+
+    func scanModule(_ probe: HondaModuleProbe) {
+        guard canStartModuleProbe else { return }
+        startScan(mode: .module(probe))
     }
 
     private var candidateEndpoints: FIXDEndpoints? {
@@ -390,13 +402,21 @@ final class BluetoothBridge: NSObject, ObservableObject {
                 session = try FIXDLiveSession(peripheral: selected, receive: endpoints.receive, transmit: endpoints.transmit)
             } catch {
                 liveScanStatus = error.localizedDescription
+                if case .module(let probe) = mode {
+                    moduleProbeStatus[probe] = error.localizedDescription
+                }
                 return
             }
             liveSession = session
         }
         isStopRequested = false
         scanMode = mode
-        liveScanStatus = "Preparing vehicle readings…"
+        if case .module(let probe) = mode {
+            moduleProbeResult[probe] = nil
+            setScanStatus("Preparing a read-only module check…")
+        } else {
+            setScanStatus("Preparing vehicle readings…")
+        }
         liveScanTask = Task { @MainActor [weak self] in
             await self?.readVehicle(using: session, mode: mode)
         }
@@ -411,7 +431,7 @@ final class BluetoothBridge: NSObject, ObservableObject {
             } else {
                 connection = try await FIXDReadScan.connect(using: session) { message in
                     guard liveSession === session, !Task.isCancelled, !isStopRequested else { return }
-                    liveScanStatus = message
+                    setScanStatus(message)
                 }
                 guard liveSession === session, !Task.isCancelled else { return }
                 diagnosticConnection = connection
@@ -433,6 +453,25 @@ final class BluetoothBridge: NSObject, ObservableObject {
                 vehicle.recordTroubleCodes(codes)
                 liveScanResult = Self.snapshot(frame, connection: connection, troubleCodes: codes)
                 message = "Read-only scan complete. You can start live readings."
+            case .module(let probe):
+                guard connection.supportsHondaModuleProbes else {
+                    finishLiveScan(FIXDReadScan.Failure.unsupportedModuleProtocol.localizedDescription)
+                    return
+                }
+                setScanStatus("Waiting for the targeted module’s reply…")
+                // The module read restores adapter defaults. The next scan verifies fresh CAN settings.
+                diagnosticConnection = nil
+                let outcome = try await FIXDReadScan.readModule(probe, using: session, connection: connection)
+                guard liveSession === session, !Task.isCancelled else { return }
+                switch outcome {
+                case .response(let result):
+                    moduleProbeResult[probe] = result
+                    message = "The expected CAN address returned data. The module identity and data fields still need verification."
+                case .noResponse:
+                    message = "No reply to this read. Module support remains unverified."
+                case .rejected(let code):
+                    message = "The addressed ECU declined the read (" + String(format: "0x%02X", Int(code)) + ")."
+                }
             }
 
             guard liveSession === session, !Task.isCancelled else { return }
@@ -499,16 +538,27 @@ final class BluetoothBridge: NSObject, ObservableObject {
         )
     }
 
+    private func setScanStatus(_ message: String) {
+        liveScanStatus = message
+        if case .module(let probe) = scanMode {
+            moduleProbeStatus[probe] = message
+        }
+    }
+
     private func finishLiveScan(_ message: String) {
+        setScanStatus(message)
         liveScanTask = nil
         scanMode = nil
         isStopRequested = false
-        liveScanStatus = message
         vehicle.setMonitoring(false)
     }
 
     private func resetLiveSession(_ message: String) {
-        let wasReading = isLiveScanRunning
+        if isLiveScanRunning {
+            setScanStatus("Vehicle readings stopped. " + message)
+        } else if phase == .ready {
+            liveScanStatus = "Diagnostic session closed."
+        }
         liveScanTask?.cancel()
         liveScanTask = nil
         scanMode = nil
@@ -517,11 +567,6 @@ final class BluetoothBridge: NSObject, ObservableObject {
         liveSession = nil
         diagnosticConnection = nil
         vehicle.setMonitoring(false)
-        if wasReading {
-            liveScanStatus = "Vehicle readings stopped. " + message
-        } else if phase == .ready {
-            liveScanStatus = "Diagnostic session closed."
-        }
         session?.invalidate()
     }
 
@@ -563,6 +608,8 @@ final class BluetoothBridge: NSObject, ObservableObject {
         }
 
         vehicle.clearForNewAdapter()
+        moduleProbeStatus.removeAll()
+        moduleProbeResult.removeAll()
         selected = peripheral
         peripheral.delegate = self
         report = DiscoveryReport(

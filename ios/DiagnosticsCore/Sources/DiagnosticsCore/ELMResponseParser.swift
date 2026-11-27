@@ -6,15 +6,19 @@ public enum TroubleCodeCategory: UInt8, CaseIterable, Sendable {
     case permanent = 0x0A
 }
 
-/// Values the standard diagnostics session is allowed to request.
+/// Fixed diagnostic reads that the transport is allowed to request.
 public enum DiagnosticRequest: Equatable, Sendable {
     case currentData(CurrentDataPID)
     case troubleCodes(TroubleCodeCategory)
+    case hondaData(HondaModuleProbe)
 
     public var requestPayload: [UInt8] {
         switch self {
         case let .currentData(pid): return pid.requestPayload
         case let .troubleCodes(category): return [category.rawValue]
+        case let .hondaData(probe):
+            let identifier = probe.dataIdentifier
+            return [0x22, UInt8(identifier >> 8), UInt8(truncatingIfNeeded: identifier)]
         }
     }
 
@@ -40,6 +44,8 @@ public struct CANResponder: Hashable, Sendable {
 public enum DiagnosticOutcome: Equatable, Sendable {
     case currentData(CurrentDataValue)
     case troubleCodes([String])
+    /// Opaque data record. The matching service and identifier have been removed.
+    case manufacturerData([UInt8])
     case negativeResponse(code: UInt8)
 }
 
@@ -57,9 +63,11 @@ public enum ELMResponseError: LocalizedError, Equatable {
     case invalidFrame(line: Int)
     case invalidTransport(responder: CANResponder, line: Int)
     case incompleteTransport(responder: CANResponder)
+    case unexpectedResponder(expected: String, received: CANResponder)
     case unexpectedResponse(responder: CANResponder)
     case currentData(responder: CANResponder, reason: CurrentDataDecodingError)
     case invalidTroubleCodes(responder: CANResponder)
+    case invalidManufacturerData(responder: CANResponder)
     case conflictingResponses(responder: CANResponder)
 
     public var errorDescription: String? {
@@ -78,12 +86,16 @@ public enum ELMResponseError: LocalizedError, Equatable {
             return "ECU \(responder.hexIdentifier) returned an invalid ISO-TP frame on line \(line)."
         case let .incompleteTransport(responder):
             return "The ISO-TP response from ECU \(responder.hexIdentifier) ended early."
+        case let .unexpectedResponder(expected, received):
+            return "Expected a reply from ECU \(expected), but ECU \(received.hexIdentifier) responded."
         case let .unexpectedResponse(responder):
             return "ECU \(responder.hexIdentifier) returned a response for a different request."
         case let .currentData(responder, _):
             return "ECU \(responder.hexIdentifier) returned invalid current data for the requested PID."
         case let .invalidTroubleCodes(responder):
             return "ECU \(responder.hexIdentifier) returned an invalid trouble-code list."
+        case let .invalidManufacturerData(responder):
+            return "ECU \(responder.hexIdentifier) returned an incomplete manufacturer data record."
         case let .conflictingResponses(responder):
             return "ECU \(responder.hexIdentifier) returned conflicting responses."
         }
@@ -132,6 +144,10 @@ public enum ELMResponseParser {
 
             let lineNumber = index + 1
             let frame = try CANFrame(compact, line: lineNumber)
+            if case let .hondaData(probe) = request,
+               frame.responder.width != .extended29Bit || frame.responder.hexIdentifier != probe.responseCANID {
+                throw ELMResponseError.unexpectedResponder(expected: probe.responseCANID, received: frame.responder)
+            }
             if seen.insert(frame.responder).inserted {
                 order.append(frame.responder)
             }
@@ -285,6 +301,15 @@ public enum ELMResponseParser {
                     codes.append(troubleCode(value))
                 }
                 outcome = .troubleCodes(codes)
+            case let .hondaData(probe):
+                guard payload.count > 3 else {
+                    throw ELMResponseError.invalidManufacturerData(responder: responder)
+                }
+                let identifier = UInt16(payload[1]) << 8 | UInt16(payload[2])
+                guard identifier == probe.dataIdentifier else {
+                    throw ELMResponseError.unexpectedResponse(responder: responder)
+                }
+                outcome = .manufacturerData(Array(payload.dropFirst(3)))
             }
         }
         return DiagnosticResponse(responder: responder, payload: payload, outcome: outcome)

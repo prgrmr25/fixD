@@ -145,6 +145,70 @@ final class ELMResponseParserTests: XCTestCase {
         XCTAssertEqual(dtcResponse.first?.outcome, .negativeResponse(code: 0x11))
     }
 
+    func testHondaProbeAllowlistUsesFixedReadRequestsAndPhysicalCANAddresses() {
+        let probes: [(HondaModuleProbe, UInt8, UInt16, String, String, String)] = [
+            (.powertrain, 0x11, 0x2661, "18DA11F1", "18DAF111", "222661\r"),
+            (.transmission, 0x1D, 0x2200, "18DA1DF1", "18DAF11D", "222200\r"),
+            (.shawd, 0x25, 0x6119, "18DA25F1", "18DAF125", "226119\r"),
+            (.absVSA, 0x28, 0x4000, "18DA28F1", "18DAF128", "224000\r"),
+            (.tpms, 0x26, 0x6000, "18DA26F1", "18DAF126", "226000\r"),
+            (.srs, 0x53, 0x8000, "18DA53F1", "18DAF153", "228000\r"),
+            (.instrumentCluster, 0x60, 0x7000, "18DA60F1", "18DAF160", "227000\r")
+        ]
+        XCTAssertEqual(HondaModuleProbe.allCases, probes.map { $0.0 })
+        for (probe, address, identifier, requestID, responseID, command) in probes {
+            XCTAssertEqual(probe.ecuAddress, address)
+            XCTAssertEqual(probe.dataIdentifier, identifier)
+            XCTAssertEqual(probe.requestCANID, requestID)
+            XCTAssertEqual(probe.responseCANID, responseID)
+            XCTAssertEqual(ASCIIPromptFramer.encode(.hondaData(probe)), Array(command.utf8))
+        }
+    }
+
+    func testHondaProbeReassemblesFragmentedPositiveReplyAsOpaqueData() throws {
+        var framer = ASCIIPromptFramer()
+        XCTAssertEqual(try framer.consume(Array("22 26 61\r18DAF111100B6226".utf8)), [])
+        XCTAssertEqual(try framer.consume(Array("61010203\r18 DA F1 11 21 04 05".utf8)), [])
+        let replies = try framer.consume(Array(" 06 07 08 AA AA\r>".utf8))
+        let reply = try XCTUnwrap(replies.first)
+        let responses = try ELMResponseParser.parse(reply, for: .hondaData(.powertrain))
+        XCTAssertEqual(responses.map(\.responder.hexIdentifier), ["18DAF111"])
+        XCTAssertEqual(responses.first?.payload, [0x62, 0x26, 0x61, 1, 2, 3, 4, 5, 6, 7, 8])
+        XCTAssertEqual(responses.first?.outcome, .manufacturerData([1, 2, 3, 4, 5, 6, 7, 8]))
+    }
+
+    func testHondaProbeRejectsMismatchedDIDMissingDataAndWrongECU() {
+        let source = CANResponder(identifier: 0x18DAF111, width: .extended29Bit)
+        let other = CANResponder(identifier: 0x18DAF11D, width: .extended29Bit)
+        let standard = CANResponder(identifier: 0x7E8, width: .standard11Bit)
+        let cases: [(String, ELMResponseError)] = [
+            ("18DAF111 04 62 26 60 01", .unexpectedResponse(responder: source)),
+            ("18DAF111 03 62 26 61", .invalidManufacturerData(responder: source)),
+            ("18DAF11D 04 62 26 61 01", .unexpectedResponder(expected: "18DAF111", received: other)),
+            ("7E8 04 62 26 61 01", .unexpectedResponder(expected: "18DAF111", received: standard))
+        ]
+        for (reply, expected) in cases {
+            XCTAssertThrowsError(try ELMResponseParser.parse(reply, for: .hondaData(.powertrain))) {
+                XCTAssertEqual($0 as? ELMResponseError, expected, reply)
+            }
+        }
+    }
+
+    func testHondaProbeAcceptsOnlyItsTargetECUNegativeReply() throws {
+        let request = DiagnosticRequest.hondaData(.absVSA)
+        let match = try ELMResponseParser.parse("18DAF128 03 7F 22 31", for: request)
+        XCTAssertEqual(match.first?.outcome, .negativeResponse(code: 0x31))
+
+        let other = CANResponder(identifier: 0x18DAF125, width: .extended29Bit)
+        XCTAssertThrowsError(try ELMResponseParser.parse("18DAF125 03 7F 22 31", for: request)) {
+            XCTAssertEqual($0 as? ELMResponseError, .unexpectedResponder(expected: "18DAF128", received: other))
+        }
+        let target = CANResponder(identifier: 0x18DAF128, width: .extended29Bit)
+        XCTAssertThrowsError(try ELMResponseParser.parse("18DAF128 03 7F 01 11", for: request)) {
+            XCTAssertEqual($0 as? ELMResponseError, .unexpectedResponse(responder: target))
+        }
+    }
+
     func testRejectsAdapterStatusAndAmbiguousFrames() throws {
         let cases: [(String, ELMResponseError)] = [
             ("NO DATA\r>", .noData),

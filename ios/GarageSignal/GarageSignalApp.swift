@@ -44,7 +44,11 @@ struct GarageSignalApp: App {
                             case .adapter:
                                 AdapterInspectorView(bridge: bridge)
                             case .modules:
-                                ModuleCatalogView(vehicle: bridge.vehicle)
+                                ModuleCatalogView(
+                                    vehicle: bridge.vehicle,
+                                    bridge: bridge,
+                                    onOpenAdapter: openAdapter
+                                )
                             case .serviceFunctions:
                                 ServiceFunctionsView()
                             }

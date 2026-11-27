@@ -34,10 +34,35 @@ struct FIXDScanSnapshot {
     let unavailableReadings: [String]
 }
 
+struct HondaModuleProbeResult {
+    let probe: HondaModuleProbe
+    let responder: String
+    let payload: [UInt8]
+    let capturedAt: Date
+
+    var did: String { String(format: "%04X", Int(probe.dataIdentifier)) }
+    var byteCount: Int { payload.count }
+    var rawHex: String { payload.map { String(format: "%02X", Int($0)) }.joined(separator: " ") }
+
+    var report: String {
+        [
+            "Honda read-only module probe",
+            "Candidate: \(probe.title)",
+            "Captured: \(capturedAt.ISO8601Format())",
+            "Request address: \(probe.requestCANID)",
+            "Responder: \(responder)",
+            "Data identifier: \(did)",
+            "Payload (\(byteCount) bytes): \(rawHex)",
+            "Module identity and field meanings are unverified.",
+        ].joined(separator: "\n")
+    }
+}
+
 @MainActor
 enum FIXDReadScan {
     struct Connection {
         let vehicleProtocol: String
+        let supportsHondaModuleProbes: Bool
         fileprivate let sessionID: ObjectIdentifier
         fileprivate let supportedPIDsByECU: [String: Set<UInt8>]
 
@@ -50,10 +75,17 @@ enum FIXDReadScan {
         let unavailableReadings: [String]
     }
 
+    enum ModuleOutcome {
+        case response(HondaModuleProbeResult)
+        case noResponse
+        case rejected(UInt8)
+    }
+
     enum Failure: LocalizedError {
         case unexpectedProtocol
         case noSupportedPIDReply
         case mismatchedConnection
+        case unsupportedModuleProtocol
 
         var errorDescription: String? {
             switch self {
@@ -63,6 +95,8 @@ enum FIXDReadScan {
                 return "No vehicle ECU returned a supported-PID bitmap. Check ignition and adapter connection."
             case .mismatchedConnection:
                 return "Vehicle data must be read through the adapter session that discovered it."
+            case .unsupportedModuleProtocol:
+                return "Honda module scans require a 29-bit CAN connection at 500 kbit/s."
             }
         }
     }
@@ -100,7 +134,7 @@ enum FIXDReadScan {
         let probe = DiagnosticRequest.currentData(.supported01Through20)
         let reply = try await session.read(probe)
         let protocolReply = try await session.readAdapterProtocol()
-        let protocolName = try canProtocol(protocolReply)
+        let vehicleProtocol = try canProtocol(protocolReply)
         let answers: [DiagnosticResponse]
         do {
             answers = try ELMResponseParser.parse(reply, for: probe)
@@ -135,7 +169,8 @@ enum FIXDReadScan {
         }
 
         return Connection(
-            vehicleProtocol: protocolName,
+            vehicleProtocol: vehicleProtocol.name,
+            supportsHondaModuleProbes: vehicleProtocol.hondaModuleProbes,
             sessionID: ObjectIdentifier(session),
             supportedPIDsByECU: supportByECU
         )
@@ -194,7 +229,7 @@ enum FIXDReadScan {
                     return .init(id: ecu, codes: codes, unavailableReason: nil)
                 case .negativeResponse(let code):
                     return .init(id: ecu, codes: [], unavailableReason: String(format: "ECU returned 0x%02X", Int(code)))
-                case .currentData:
+                case .currentData, .manufacturerData:
                     return nil
                 }
             }
@@ -202,6 +237,26 @@ enum FIXDReadScan {
         }
 
         return codeGroups
+    }
+
+    static func readModule(
+        _ probe: HondaModuleProbe,
+        using session: FIXDLiveSession,
+        connection: Connection
+    ) async throws -> ModuleOutcome {
+        guard connection.sessionID == ObjectIdentifier(session) else { throw Failure.mismatchedConnection }
+        guard connection.supportsHondaModuleProbes else { throw Failure.unsupportedModuleProtocol }
+        let reply = try await session.readModule(probe)
+        let answers = try optionalAnswers(reply, for: .hondaData(probe))
+        guard let answer = answers.first else { return .noResponse }
+        if case .manufacturerData(let payload) = answer.outcome {
+            return .response(.init(probe: probe, responder: answer.responder.hexIdentifier,
+                                   payload: payload, capturedAt: .now))
+        }
+        if case .negativeResponse(let code) = answer.outcome {
+            return .rejected(code)
+        }
+        return .noResponse
     }
 
     private static func optionalAnswers(
@@ -215,7 +270,7 @@ enum FIXDReadScan {
         }
     }
 
-    private static func canProtocol(_ reply: String) throws -> String {
+    private static func canProtocol(_ reply: String) throws -> (name: String, hondaModuleProbes: Bool) {
         let meaningfulLines = reply.split(whereSeparator: \.isNewline)
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).uppercased() }
             .filter { !$0.isEmpty && $0 != "ATDPN" }
@@ -224,10 +279,10 @@ enum FIXDReadScan {
         }
         let code = line.hasPrefix("A") ? String(line.dropFirst()) : line
         switch code {
-        case "6": return "ISO 15765-4 CAN · 11-bit, 500 kbit/s"
-        case "7": return "ISO 15765-4 CAN · 29-bit, 500 kbit/s"
-        case "8": return "ISO 15765-4 CAN · 11-bit, 250 kbit/s"
-        case "9": return "ISO 15765-4 CAN · 29-bit, 250 kbit/s"
+        case "6": return ("ISO 15765-4 CAN · 11-bit, 500 kbit/s", false)
+        case "7": return ("ISO 15765-4 CAN · 29-bit, 500 kbit/s", true)
+        case "8": return ("ISO 15765-4 CAN · 11-bit, 250 kbit/s", false)
+        case "9": return ("ISO 15765-4 CAN · 29-bit, 250 kbit/s", false)
         default: throw Failure.unexpectedProtocol
         }
     }
