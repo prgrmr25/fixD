@@ -13,7 +13,7 @@ permissions:
 
 jobs:
   archive:
-    runs-on: macos-26
+    runs-on: macos-15
     timeout-minutes: 40
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
@@ -43,41 +43,48 @@ jobs:
           brew install xcodegen
           xcodegen generate
 
-      - name: Smoke test the app on an iPhone simulator
-        working-directory: ios
+      - name: Select the matching iPhone simulator
+        id: simulator
+        timeout-minutes: 6
         shell: bash
         run: |
+          runtime=$(xcrun --sdk iphonesimulator --show-sdk-version)
           simctl_json="$RUNNER_TEMP/garage-signal-simulators.json"
+          echo "Listing iPhone simulators for iOS $runtime."
           xcrun simctl list --json devices available > "$simctl_json"
 
-          simulator=$(python3 - "$simctl_json" <<'PY'
+          device=$(python3 - "$simctl_json" "$runtime" <<'PY'
           import json
           import sys
 
           with open(sys.argv[1], encoding="utf-8") as stream:
               devices_by_runtime = json.load(stream)["devices"]
-
-          candidates = []
-          for runtime, devices in devices_by_runtime.items():
-              prefix = "com.apple.CoreSimulator.SimRuntime.iOS-"
-              if not runtime.startswith(prefix):
-                  continue
-              version = tuple(map(int, runtime.removeprefix(prefix).split("-")))
-              for device in devices:
-                  if device["isAvailable"] and device["name"].startswith("iPhone"):
-                      candidates.append((version, device["name"], device["udid"]))
-
-          if not candidates:
-              sys.exit("No available iPhone simulator found on the selected Xcode runner.")
-          print(max(candidates)[2])
+          runtime = "com.apple.CoreSimulator.SimRuntime.iOS-" + sys.argv[2].replace(".", "-")
+          iphones = [
+              device for device in devices_by_runtime.get(runtime, [])
+              if device["isAvailable"] and device["name"].startswith("iPhone")
+          ]
+          if not iphones:
+              sys.exit("The selected Xcode SDK has no matching iPhone simulator.")
+          selected = next((device for device in iphones if device["name"] == "iPhone 17 Pro"), iphones[0])
+          print(selected["udid"])
           PY
           )
+          echo "Selected iPhone simulator: $device"
+          echo "device=$device" >> "$GITHUB_OUTPUT"
 
-          echo "Selected iPhone simulator: $simulator"
-          xcrun simctl bootstatus "$simulator" -b
+      - name: Smoke test the app on an iPhone simulator
+        timeout-minutes: 12
+        working-directory: ios
+        env:
+          SIMULATOR: ${{ steps.simulator.outputs.device }}
+        shell: bash
+        run: |
+          simulator="$SIMULATOR"
           xcodebuild -project GarageSignal.xcodeproj -scheme GarageSignal \
             -configuration Debug -destination "platform=iOS Simulator,id=$simulator" \
-            -parallel-testing-enabled NO CODE_SIGNING_ALLOWED=NO \
+            -destination-timeout 240 -parallel-testing-enabled NO CODE_SIGNING_ALLOWED=NO \
+            -test-timeouts-enabled YES -default-test-execution-time-allowance 120 \
             -resultBundlePath "$RUNNER_TEMP/GarageSignal-smoke.xcresult" test
 
           if app_data=$(xcrun simctl get_app_container "$simulator" "$EXPECTED_BUNDLE_ID" data 2>/dev/null); then
