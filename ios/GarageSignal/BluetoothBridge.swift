@@ -68,7 +68,7 @@ struct AdapterInspectorView: View {
                             Label("Share Connection Status", systemImage: "square.and.arrow.up")
                         }
                     }
-                    if bridge.isContinuousScanRunning {
+                    if bridge.canStopLiveReadings {
                         Button(
                             bridge.isStopRequested ? "Stopping Live Readings…" : "Stop Live Readings",
                             systemImage: "stop.circle",
@@ -335,7 +335,9 @@ final class BluetoothBridge: NSObject, ObservableObject {
     private var liveScanTask: Task<Void, Never>?
 
     private var isLiveScanRunning: Bool { scanMode != nil }
-    var isContinuousScanRunning: Bool { scanMode == .continuous }
+    var canStopLiveReadings: Bool {
+        scanMode == .continuous && diagnosticConnection != nil
+    }
 
     var isStartingScan: Bool { phase == .startingScan }
     var isScanning: Bool { phase == .scanning }
@@ -368,7 +370,7 @@ final class BluetoothBridge: NSObject, ObservableObject {
     }
 
     func stopVehicleReadings() {
-        guard isContinuousScanRunning, !isStopRequested else { return }
+        guard canStopLiveReadings, !isStopRequested else { return }
         isStopRequested = true
         vehicle.setMonitoring(false)
         liveScanStatus = "Stopping after the current adapter reply…"
