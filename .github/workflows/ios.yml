@@ -1,0 +1,35 @@
+name: macOS iOS build
+
+on:
+  push:
+    paths:
+      - 'ios/**'
+      - '.github/workflows/ios.yml'
+  pull_request:
+    paths:
+      - 'ios/**'
+      - '.github/workflows/ios.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test the diagnostics library
+        run: swift test --package-path ios/DiagnosticsCore
+      - name: Install XcodeGen
+        run: brew install xcodegen
+      - name: Generate the iOS Xcode project
+        working-directory: ios
+        run: xcodegen generate
+      - name: Compile the iOS app for a device
+        working-directory: ios
+        run: >-
+          xcodebuild -project GarageSignal.xcodeproj -scheme GarageSignal
+          -configuration Release -destination 'generic/platform=iOS'
+          CODE_SIGNING_ALLOWED=NO build

@@ -1,0 +1,13 @@
+.DS_Store
+**/.build/
+**/DerivedData/
+**/*.xcodeproj/
+**/*.xcuserstate
+**/xcuserdata/
+*.p8
+*.p12
+*.mobileprovision
+*.ipa
+*.apk
+*.xapk
+.env
