@@ -185,7 +185,7 @@ jobs:
           [[ "$(plutil -extract CFBundleSupportedPlatforms.0 raw "$info")" == iPhoneOS ]]
           executable=$(plutil -extract CFBundleExecutable raw "$info")
           test -x "$app/$executable"
-          xcrun lipo -verify_arch arm64 "$app/$executable"
+          xcrun lipo "$app/$executable" -verify_arch arm64
           test ! -f "$app/embedded.mobileprovision"
           [[ "$(plutil -extract ITSAppUsesNonExemptEncryption raw "$info")" == false ]]
           if signature=$(codesign --display --verbose=4 "$app" 2>&1); then
