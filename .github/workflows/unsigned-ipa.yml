@@ -12,9 +12,9 @@ permissions:
   contents: read
 
 jobs:
-  archive:
+  verify:
     runs-on: macos-15
-    timeout-minutes: 40
+    timeout-minutes: 30
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
       EXPECTED_BUNDLE_ID: com.ayub.garagesignalobd
@@ -133,6 +133,31 @@ jobs:
           else
             echo "::notice::The UI tests passed, but the simulator app data container is unavailable after testing."
           fi
+
+  archive:
+    runs-on: macos-26
+    timeout-minutes: 15
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+      EXPECTED_BUNDLE_ID: com.ayub.garagesignalobd
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Verify Xcode and device SDK
+        shell: bash
+        run: |
+          xcodebuild -version
+          sdk_major=$(xcrun --sdk iphoneos --show-sdk-version | cut -d. -f1)
+          [[ "$sdk_major" -ge 26 ]]
+
+      - name: Generate the Xcode project
+        working-directory: ios
+        shell: bash
+        run: |
+          brew install xcodegen
+          xcodegen generate
 
       - name: Archive the unsigned iOS device build
         working-directory: ios
