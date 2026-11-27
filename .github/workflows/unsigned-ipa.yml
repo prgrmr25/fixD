@@ -1,0 +1,192 @@
+name: Verify and archive unsigned iOS build
+
+on:
+  push:
+    paths:
+      - '.github/workflows/unsigned-ipa.yml'
+      - 'ios/GarageSignalUITests/**'
+      - 'ios/project.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  archive:
+    runs-on: macos-26
+    timeout-minutes: 40
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+      EXPECTED_BUNDLE_ID: com.ayub.garagesignalobd
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Verify Xcode and device SDK
+        shell: bash
+        run: |
+          test -d "$DEVELOPER_DIR"
+          xcodebuild -version
+          xcode_major=$(xcodebuild -version | awk 'NR == 1 { split($2, version, "."); print version[1] }')
+          sdk_version=$(xcrun --sdk iphoneos --show-sdk-version)
+          echo "iPhoneOS SDK $sdk_version"
+          [[ "$xcode_major" -ge 26 && "${sdk_version%%.*}" -ge 26 ]]
+
+      - name: Test the diagnostics library
+        run: swift test --package-path ios/DiagnosticsCore
+
+      - name: Generate the Xcode project
+        working-directory: ios
+        shell: bash
+        run: |
+          brew install xcodegen
+          xcodegen generate
+
+      - name: Smoke test the app on an iPhone simulator
+        working-directory: ios
+        shell: bash
+        run: |
+          simctl_json="$RUNNER_TEMP/garage-signal-simulators.json"
+          xcrun simctl list --json devices available > "$simctl_json"
+
+          simulator=$(python3 - "$simctl_json" <<'PY'
+          import json
+          import sys
+
+          with open(sys.argv[1], encoding="utf-8") as stream:
+              devices_by_runtime = json.load(stream)["devices"]
+
+          candidates = []
+          for runtime, devices in devices_by_runtime.items():
+              prefix = "com.apple.CoreSimulator.SimRuntime.iOS-"
+              if not runtime.startswith(prefix):
+                  continue
+              version = tuple(map(int, runtime.removeprefix(prefix).split("-")))
+              for device in devices:
+                  if device["isAvailable"] and device["name"].startswith("iPhone"):
+                      candidates.append((version, device["name"], device["udid"]))
+
+          if not candidates:
+              sys.exit("No available iPhone simulator found on the selected Xcode runner.")
+          print(max(candidates)[2])
+          PY
+          )
+
+          echo "Selected iPhone simulator: $simulator"
+          xcrun simctl bootstatus "$simulator" -b
+          xcodebuild -project GarageSignal.xcodeproj -scheme GarageSignal \
+            -configuration Debug -destination "platform=iOS Simulator,id=$simulator" \
+            -parallel-testing-enabled NO CODE_SIGNING_ALLOWED=NO \
+            -resultBundlePath "$RUNNER_TEMP/GarageSignal-smoke.xcresult" test
+
+          if app_data=$(xcrun simctl get_app_container "$simulator" "$EXPECTED_BUNDLE_ID" data 2>/dev/null); then
+            python3 - "$app_data/Library/Application Support/Demo Logs" <<'PY'
+          import csv
+          from datetime import datetime, timedelta
+          import math
+          from pathlib import Path
+          import sys
+
+          logs = sorted(Path(sys.argv[1]).glob("*.csv"))
+          if not logs:
+              sys.exit("Simulator app container contains no recorded demo CSV.")
+
+          expected_columns = [
+              "timestamp_utc", "source", "engine_rpm", "vehicle_mph", "coolant_f",
+              "ignition_advance_deg", "throttle_pct", "module_voltage_v",
+              "engine_load_pct", "short_fuel_trim_bank_1_pct",
+              "short_fuel_trim_bank_2_pct", "long_fuel_trim_bank_1_pct",
+              "long_fuel_trim_bank_2_pct",
+          ]
+          for log in logs:
+              with log.open(newline="", encoding="utf-8") as stream:
+                  rows = csv.reader(stream)
+                  if next(rows, None) != expected_columns:
+                      sys.exit("Unexpected simulator CSV column list.")
+                  has_sample = False
+                  for row in rows:
+                      try:
+                          timestamp = datetime.fromisoformat(row[0].replace("Z", "+00:00"))
+                          valid = (
+                              timestamp.utcoffset() == timedelta(0)
+                              and len(row) == len(expected_columns)
+                              and row[1] == "simulated"
+                              and all(math.isfinite(float(value)) for value in row[2:])
+                          )
+                      except (IndexError, ValueError):
+                          valid = False
+                      if not valid:
+                          sys.exit("Malformed simulator CSV sample.")
+                      has_sample = True
+                  if not has_sample:
+                      sys.exit("The recorded simulator CSV has no sample rows.")
+          print("Validated persisted simulator CSV headers, source, timestamps, and numeric samples.")
+          PY
+          else
+            echo "::notice::The UI tests passed, but the simulator app data container is unavailable after testing."
+          fi
+
+      - name: Archive the unsigned iOS device build
+        working-directory: ios
+        shell: bash
+        run: |
+          xcodebuild -project GarageSignal.xcodeproj -scheme GarageSignal \
+            -configuration Release -destination 'generic/platform=iOS' \
+            -archivePath "$RUNNER_TEMP/GarageSignal.xcarchive" \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY= \
+            DEBUG_INFORMATION_FORMAT=dwarf-with-dsym archive
+
+      - name: Verify and package the application with matching symbols
+        shell: bash
+        run: |
+          archive="$RUNNER_TEMP/GarageSignal.xcarchive"
+          app="$archive/Products/Applications/GarageSignal.app"
+          info="$app/Info.plist"
+          symbols="$archive/dSYMs"
+          app_symbols="$symbols/GarageSignal.app.dSYM"
+          test -f "$info"
+          test -d "$app_symbols"
+          test -f "$app/PrivacyInfo.xcprivacy"
+          actual_bundle_id=$(plutil -extract CFBundleIdentifier raw "$info")
+          [[ "$actual_bundle_id" == "$EXPECTED_BUNDLE_ID" ]]
+          [[ "$(plutil -extract CFBundleSupportedPlatforms.0 raw "$info")" == iPhoneOS ]]
+          executable=$(plutil -extract CFBundleExecutable raw "$info")
+          test -x "$app/$executable"
+          xcrun lipo -verify_arch arm64 "$app/$executable"
+          test ! -f "$app/embedded.mobileprovision"
+          [[ "$(plutil -extract ITSAppUsesNonExemptEncryption raw "$info")" == false ]]
+          if signature=$(codesign --display --verbose=4 "$app" 2>&1); then
+            if [[ "$signature" != *"Signature=adhoc"* ]]; then
+              echo "Unexpected non-ad-hoc signature on the app."
+              exit 1
+            fi
+            codesign --remove-signature "$app"
+          fi
+          if codesign --display "$app" >/dev/null 2>&1; then
+            echo "The packaged app must be unsigned."
+            exit 1
+          fi
+
+          binary_uuids=$(xcrun dwarfdump --uuid "$app/$executable" | awk '{ print $2, $3 }' | sort)
+          dsym_uuids=$(xcrun dwarfdump --uuid "$app_symbols" | awk '{ print $2, $3 }' | sort)
+          [[ -n "$binary_uuids" && "$binary_uuids" == "$dsym_uuids" ]]
+          echo "Verified $actual_bundle_id with matching symbols:"
+          echo "$binary_uuids"
+
+          package="$RUNNER_TEMP/GarageSignal-unsigned"
+          mkdir -p "$package"
+          ditto "$app" "$package/GarageSignal.app"
+          ditto "$symbols" "$package/dSYMs"
+          ditto -c -k --keepParent "$package" "$RUNNER_TEMP/GarageSignal-unsigned.zip"
+          unzip -tq "$RUNNER_TEMP/GarageSignal-unsigned.zip"
+
+      - name: Upload the unsigned app and dSYMs
+        uses: actions/upload-artifact@v7
+        with:
+          name: GarageSignal-unsigned
+          path: ${{ runner.temp }}/GarageSignal-unsigned.zip
+          if-no-files-found: error
+          compression-level: 0
+          overwrite: true
+          retention-days: 14

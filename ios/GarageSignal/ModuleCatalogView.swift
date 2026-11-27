@@ -123,6 +123,7 @@ struct ModuleCatalogView: View {
                             .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
+                        .accessibilityIdentifier(module.id)
                     }
                 }
             }

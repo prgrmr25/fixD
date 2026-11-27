@@ -107,6 +107,7 @@ private struct SignalRow: View {
             }
         }
         .accessibilityElement(children: .combine)
+        .accessibilityIdentifier(signal.id)
     }
 }
 

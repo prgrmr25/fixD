@@ -48,6 +48,7 @@ struct LogsView: View {
                         Label("Stop and save", systemImage: "stop.fill")
                     }
                     .buttonStyle(.borderedProminent)
+                    .accessibilityIdentifier("save-demo")
                 } else {
                     Text("Record a demo session")
                         .font(.headline)
@@ -60,6 +61,7 @@ struct LogsView: View {
                         Label("Start recording", systemImage: "record.circle")
                     }
                     .buttonStyle(.borderedProminent)
+                    .accessibilityIdentifier("record-demo")
                 }
             }
         }
@@ -77,6 +79,7 @@ struct LogsView: View {
                     Label("Export CSV", systemImage: "square.and.arrow.up")
                 }
                 .buttonStyle(.bordered)
+                .accessibilityIdentifier("export-demo")
             }
         }
     }

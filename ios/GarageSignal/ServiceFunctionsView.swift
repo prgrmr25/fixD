@@ -67,5 +67,6 @@ struct ServiceFunctionsView: View {
                 .foregroundStyle(GarageTheme.warning)
         }
         .accessibilityElement(children: .combine)
+        .accessibilityIdentifier(name)
     }
 }

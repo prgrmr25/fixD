@@ -60,6 +60,7 @@ struct DiagnosticsView: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .accessibilityIdentifier(title)
         }
     }
 }

@@ -52,6 +52,7 @@ struct DashboardView: View {
                 } label: {
                     Label("Edit gauges", systemImage: "slider.horizontal.3")
                 }
+                .accessibilityIdentifier("edit-gauges")
             }
         }
         .sheet(isPresented: $editing) {
