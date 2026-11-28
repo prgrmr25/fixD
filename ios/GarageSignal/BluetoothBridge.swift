@@ -677,11 +677,14 @@ final class BluetoothBridge: NSObject, ObservableObject {
         disconnect(because: "Disconnected.")
     }
 
-    func close() {
+    func prepareForBackground() {
         if isStartingScan || isScanning {
             finishScan("Scan stopped.")
         }
-        if hasActiveConnection {
+        // Preserve a discovered, idle FIXD while the user switches apps or shares
+        // a completed report. Discovery and in-flight reads still stop here.
+        let isIdleFIXD = phase == .ready && vehicle.isAdapterConnected && !isLiveScanRunning
+        if hasActiveConnection && !isIdleFIXD {
             disconnect(because: "Bluetooth closed when the app entered the background.")
         }
     }

@@ -59,7 +59,11 @@ final class GarageSignalUITests: XCTestCase {
 
         app.tabBars.buttons["Diagnostics"].tap()
         app.buttons["Scan a vehicle with FIXD"].tap()
-        XCTAssertTrue(app.navigationBars["Bluetooth Inspector"].waitForExistence(timeout: 8))
+        let inspector = app.navigationBars["Bluetooth Inspector"]
+        XCTAssertTrue(inspector.waitForExistence(timeout: 8))
+        XCUIDevice.shared.press(.home)
+        app.activate()
+        XCTAssertTrue(inspector.waitForExistence(timeout: 8))
         XCTAssertTrue(app.buttons["Scan Nearby"].exists)
         XCTAssertFalse(app.buttons["Scan Vehicle"].exists)
         XCTAssertFalse(app.buttons["Start Live Readings"].exists)
