@@ -205,7 +205,7 @@ enum FIXDReadScan {
         connection: Connection,
         includeScanOnly: Bool = false,
         livePIDs: [CurrentDataPID]? = nil,
-        onSample: ((CurrentDataSample) -> Void)? = nil,
+        onSample: (CurrentDataSample) -> Void = { _ in },
         shouldContinue: () -> Bool = { true }
     ) async throws -> CurrentDataFrame {
         guard connection.sessionID == ObjectIdentifier(session) else { throw Failure.mismatchedConnection }
@@ -223,7 +223,7 @@ enum FIXDReadScan {
             try Task.checkCancellation()
             guard shouldContinue() else { throw CancellationError() }
             samples.append(sample)
-            onSample?(sample)
+            onSample(sample)
         }
         return CurrentDataFrame(capturedAt: .now, samples: samples)
     }
