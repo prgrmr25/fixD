@@ -158,7 +158,10 @@ final class FIXDLiveSession {
     /// Returns the raw prompt-delimited reply for a fixed read-only request.
     func read(_ request: DiagnosticRequest) async throws -> String {
         guard case .ready = phase else { throw terminalFailure ?? Failure.notReady }
-        if case .hondaData = request { throw Failure.moduleAddressRequired }
+        switch request {
+        case .hondaData, .hondaTransmissionData: throw Failure.moduleAddressRequired
+        case .currentData, .troubleCodes: break
+        }
         let timeout: Duration
         if case .currentData(.supported01Through20) = request {
             timeout = .seconds(20)
@@ -171,6 +174,7 @@ final class FIXDLiveSession {
     struct ModuleExchange {
         let directedControl: String?
         let hondaReply: String
+        let transmissionDataReply: String?
     }
 
     /// Selects one allowlisted module and restores standard configuration before handing the link back.
@@ -200,10 +204,27 @@ final class FIXDLiveSession {
 
             // Observe the standard control before narrowing the receive filter.
             try await selectModuleSetting("ATCRA" + probe.responseCANID, optional: true, trace: trace)
-            let request = ASCIIPromptFramer.encode(.hondaData(probe))
-            let reply = try await exchange(request, timeout: .seconds(10))
-            let command = String(decoding: request.dropLast(), as: UTF8.self)
-            trace(Self.traceLine("Honda read " + command, reply: reply))
+            let request = DiagnosticRequest.hondaData(probe)
+            var reply = try await readModuleRecord(request, label: "Honda read", trace: trace)
+            if probe == .powertrain, Self.endedEarly(reply, for: request),
+               try await configureSlowerFlowControl(for: probe, trace: trace) {
+                let candidate = try await readModuleRecord(request, label: "Paced Honda retry", trace: trace)
+                if let responses = try? ELMResponseParser.parse(candidate, for: request),
+                   let first = responses.first,
+                   case .manufacturerData = first.outcome {
+                    reply = candidate
+                } else {
+                    trace("No complete data record from the paced retry. The original incomplete reply was retained.")
+                }
+            }
+            var transmissionDataReply: String?
+            if probe == .transmission, HondaAutomaticTransmission.identification(reply: reply) != nil {
+                transmissionDataReply = try await readModuleRecord(
+                    .hondaTransmissionData,
+                    label: "Transmission data list",
+                    trace: trace
+                )
+            }
 
             try await configureAdapter(AdapterCommand.standardConfiguration)
             trace("Adapter acknowledged standard configuration restore.")
@@ -220,7 +241,11 @@ final class FIXDLiveSession {
             try Task.checkCancellation()
             guard case .configuring = phase else { throw terminalFailure ?? Failure.notReady }
             phase = .ready
-            return ModuleExchange(directedControl: directedControl, hondaReply: reply)
+            return ModuleExchange(
+                directedControl: directedControl,
+                hondaReply: reply,
+                transmissionDataReply: transmissionDataReply
+            )
         } catch {
             // A timed-out request or failed restore must not leave a usable targeted header.
             invalidate(because: error as? Failure ?? .cancelled)
@@ -228,15 +253,47 @@ final class FIXDLiveSession {
         }
     }
 
-    private func selectModuleSetting(_ command: String, optional: Bool, trace: (String) -> Void) async throws {
+    private func readModuleRecord(_ request: DiagnosticRequest, label: String, trace: (String) -> Void) async throws -> String {
+        let bytes = ASCIIPromptFramer.encode(request)
+        let reply = try await exchange(bytes, timeout: .seconds(10))
+        let command = String(decoding: bytes.dropLast(), as: UTF8.self)
+        trace(Self.traceLine(label + " " + command, reply: reply))
+        return reply
+    }
+
+    private static func endedEarly(_ reply: String, for request: DiagnosticRequest) -> Bool {
+        do {
+            _ = try ELMResponseParser.parse(reply, for: request)
+            return false
+        } catch ELMResponseError.incompleteTransport {
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    /// CTS with no block limit and 10 ms separation for the one PCM retry.
+    /// Write local adapter settings only, with manual flow control enabled last.
+    private func configureSlowerFlowControl(for probe: HondaModuleProbe, trace: (String) -> Void) async throws -> Bool {
+        for command in ["ATFCSH" + probe.requestCANID, "ATFCSD30000A", "ATFCSM1"] {
+            guard try await selectModuleSetting(command, optional: true, trace: trace) else {
+                trace("The adapter declined paced flow control. The incomplete reply was retained.")
+                return false
+            }
+        }
+        return true
+    }
+
+    @discardableResult
+    private func selectModuleSetting(_ command: String, optional: Bool, trace: (String) -> Void) async throws -> Bool {
         let reply = try await exchange(Array((command + "\r").utf8), timeout: .seconds(5))
         trace(Self.traceLine(command, reply: reply))
         let status = reply.split(whereSeparator: \.isNewline).map {
             $0.trimmingCharacters(in: .whitespaces).uppercased()
         }.filter { !$0.isEmpty && $0.filter { !$0.isWhitespace } != command }
-        guard status == ["OK"] || (optional && status == ["?"]) else {
-            throw Failure.rejectedSetup(command)
-        }
+        if status == ["OK"] { return true }
+        if optional && status == ["?"] { return false }
+        throw Failure.rejectedSetup(command)
     }
 
     private static func traceLine(_ label: String, reply: String) -> String {

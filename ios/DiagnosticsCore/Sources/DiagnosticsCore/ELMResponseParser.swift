@@ -11,6 +11,7 @@ public enum DiagnosticRequest: Equatable, Sendable {
     case currentData(CurrentDataPID)
     case troubleCodes(TroubleCodeCategory)
     case hondaData(HondaModuleProbe)
+    case hondaTransmissionData
 
     public var requestPayload: [UInt8] {
         switch self {
@@ -19,10 +20,20 @@ public enum DiagnosticRequest: Equatable, Sendable {
         case let .hondaData(probe):
             let identifier = probe.dataIdentifier
             return [0x22, UInt8(identifier >> 8), UInt8(truncatingIfNeeded: identifier)]
+        case .hondaTransmissionData:
+            return [0x22, 0x22, 0x01]
         }
     }
 
     fileprivate var service: UInt8 { requestPayload[0] }
+
+    fileprivate var hondaResponseCANID: String? {
+        switch self {
+        case let .hondaData(probe): return probe.responseCANID
+        case .hondaTransmissionData: return HondaModuleProbe.transmission.responseCANID
+        case .currentData, .troubleCodes: return nil
+        }
+    }
 }
 
 public struct CANResponder: Hashable, Sendable {
@@ -121,6 +132,7 @@ public enum ELMResponseParser {
         guard !body.contains(">") else { throw ELMResponseError.malformedReply }
 
         let echo = String(decoding: ASCIIPromptFramer.encode(request).dropLast(), as: UTF8.self)
+        let expectedHondaResponder = request.hondaResponseCANID
         var order: [CANResponder] = []
         var seen: Set<CANResponder> = []
         var responses: [CANResponder: DiagnosticResponse] = [:]
@@ -144,9 +156,9 @@ public enum ELMResponseParser {
 
             let lineNumber = index + 1
             let frame = try CANFrame(compact, line: lineNumber)
-            if case let .hondaData(probe) = request,
-               frame.responder.width != .extended29Bit || frame.responder.hexIdentifier != probe.responseCANID {
-                throw ELMResponseError.unexpectedResponder(expected: probe.responseCANID, received: frame.responder)
+            if let expectedHondaResponder,
+               frame.responder.width != .extended29Bit || frame.responder.hexIdentifier != expectedHondaResponder {
+                throw ELMResponseError.unexpectedResponder(expected: expectedHondaResponder, received: frame.responder)
             }
             if seen.insert(frame.responder).inserted {
                 order.append(frame.responder)
@@ -301,12 +313,11 @@ public enum ELMResponseParser {
                     codes.append(troubleCode(value))
                 }
                 outcome = .troubleCodes(codes)
-            case let .hondaData(probe):
+            case .hondaData, .hondaTransmissionData:
                 guard payload.count > 3 else {
                     throw ELMResponseError.invalidManufacturerData(responder: responder)
                 }
-                let identifier = UInt16(payload[1]) << 8 | UInt16(payload[2])
-                guard identifier == probe.dataIdentifier else {
+                guard payload[1...2].elementsEqual(request.requestPayload.dropFirst()) else {
                     throw ELMResponseError.unexpectedResponse(responder: responder)
                 }
                 outcome = .manufacturerData(Array(payload.dropFirst(3)))

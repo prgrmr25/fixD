@@ -34,10 +34,17 @@ struct FIXDScanSnapshot {
     let unavailableReadings: [String]
 }
 
+struct HondaTransmissionCapture {
+    let distinctionCode: String
+    let dataStatus: String
+    let rawHex: String?
+}
+
 struct HondaModuleProbeResult {
     let probe: HondaModuleProbe
     let responder: String
     let payload: [UInt8]
+    let transmission: HondaTransmissionCapture?
 
     var did: String { String(format: "%04X", Int(probe.dataIdentifier)) }
     var byteCount: Int { payload.count }
@@ -245,12 +252,46 @@ enum FIXDReadScan {
         let answers = try optionalAnswers(reply.hondaReply, for: .hondaData(probe))
         guard let answer = answers.first else { return .noResponse(control) }
         if case .manufacturerData(let payload) = answer.outcome {
-            return .response(.init(probe: probe, responder: answer.responder.hexIdentifier, payload: payload))
+            let transmission = probe == .transmission
+                ? transmissionCapture(identityReply: reply.hondaReply, dataReply: reply.transmissionDataReply)
+                : nil
+            return .response(.init(probe: probe, responder: answer.responder.hexIdentifier,
+                                   payload: payload, transmission: transmission))
         }
         if case .negativeResponse(let code) = answer.outcome {
             return .rejected(code)
         }
         return .noResponse(control)
+    }
+
+    private static func transmissionCapture(identityReply: String, dataReply: String?) -> HondaTransmissionCapture? {
+        guard let identification = HondaAutomaticTransmission.identification(reply: identityReply) else { return nil }
+        let distinctionCode = String(format: "0x%02X", Int(identification.distinctionCode))
+
+        let status: String
+        var rawHex: String?
+        do {
+            if let dataReply, let answer = try optionalAnswers(dataReply, for: .hondaTransmissionData).first {
+                switch answer.outcome {
+                case .manufacturerData(let bytes):
+                    if bytes.count == 36 {
+                        rawHex = bytes.map { String(format: "%02X", Int($0)) }.joined(separator: " ")
+                        status = "Data list returned 36 bytes. Field values need vehicle validation."
+                    } else {
+                        status = "The data list returned a different length from the reference layout."
+                    }
+                case .negativeResponse(let code):
+                    status = "The ECU declined the data list read (" + String(format: "0x%02X", Int(code)) + ")."
+                case .currentData, .troubleCodes:
+                    status = "The response did not match the transmission data list."
+                }
+            } else {
+                status = "The adapter returned no data for the transmission data list."
+            }
+        } catch {
+            status = error.localizedDescription
+        }
+        return HondaTransmissionCapture(distinctionCode: distinctionCode, dataStatus: status, rawHex: rawHex)
     }
 
     private static func optionalAnswers(

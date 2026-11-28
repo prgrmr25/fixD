@@ -207,6 +207,27 @@ final class ELMResponseParserTests: XCTestCase {
         XCTAssertEqual(responses.first?.outcome, .manufacturerData([1, 2, 3, 4, 5, 6, 7, 8]))
     }
 
+    func testHondaPCMReplyNeedsItsFinalTwoBytes() throws {
+        let request = DiagnosticRequest.hondaData(.powertrain)
+        let responder = CANResponder(identifier: 0x18DAF111, width: .extended29Bit)
+        let firstFrame = "18DAF111 10 39 62 26 61 A0 A1 A2"
+        let initialConsecutiveFrames = (1...7).map { sequence in
+            "18DAF111 2\(sequence) B0 B1 B2 B3 B4 B5 B6"
+        }
+        let incomplete = ([firstFrame] + initialConsecutiveFrames).joined(separator: "\r")
+        XCTAssertThrowsError(try ELMResponseParser.parse(incomplete + "\r>", for: request)) { error in
+            XCTAssertEqual(error as? ELMResponseError, .incompleteTransport(responder: responder))
+        }
+
+        let complete = incomplete + "\r18DAF111 28 C0 C1 55 55 55 55 55\r>"
+        let reply = try XCTUnwrap(ELMResponseParser.parse(complete, for: request).first)
+        guard case .manufacturerData(let bytes) = reply.outcome else {
+            return XCTFail("Expected the complete manufacturer record")
+        }
+        XCTAssertEqual(bytes.count, 54)
+        XCTAssertEqual(Array(bytes.suffix(2)), [0xC0, 0xC1])
+    }
+
     func testHondaProbeRejectsMismatchedDIDMissingDataAndWrongECU() {
         let source = CANResponder(identifier: 0x18DAF111, width: .extended29Bit)
         let other = CANResponder(identifier: 0x18DAF11D, width: .extended29Bit)
@@ -237,6 +258,59 @@ final class ELMResponseParserTests: XCTestCase {
         XCTAssertThrowsError(try ELMResponseParser.parse("18DAF128 03 7F 01 11", for: request)) {
             XCTAssertEqual($0 as? ELMResponseError, .unexpectedResponse(responder: target))
         }
+    }
+
+    func testHondaTransmissionIdentificationRequiresTheExactAddressDIDAndBodyLength() {
+        let reply = """
+        22 22 00
+        18DAF11D 10 27 62 22 00 A0 A1 A2
+        18DAF11D 21 A3 A4 A5 A6 A7 A8 A9
+        18DAF11D 22 AA AB AC AD AE AF B0
+        18DAF11D 23 B1 B2 B3 B4 B5 B6 B7
+        18DAF11D 24 B8 B9 BA BB BC BD BE
+        18DAF11D 25 BF C0 C1 C2 C3 EE EE
+        >
+        """
+        XCTAssertEqual(HondaAutomaticTransmission.identification(reply: reply)?.distinctionCode, 0xA9)
+
+        let invalidReplies = [
+            reply.replacingOccurrences(of: "18DAF11D", with: "18DAF111"),
+            reply.replacingOccurrences(of: "62 22 00", with: "62 22 01"),
+            reply.replacingOccurrences(of: "10 27", with: "10 26"),
+            reply.replacingOccurrences(of: "10 27", with: "10 28"),
+            "18DAF11D 03 7F 22 31",
+            "NO DATA"
+        ]
+        for invalid in invalidReplies {
+            XCTAssertNil(HondaAutomaticTransmission.identification(reply: invalid), invalid)
+        }
+    }
+
+    func testHondaTransmissionDataReturnsOpaqueBytesOnlyFromTheExpectedDIDAndResponder() throws {
+        let request = DiagnosticRequest.hondaTransmissionData
+        XCTAssertEqual(ASCIIPromptFramer.encode(request), Array("222201\r".utf8))
+        let reply = "222201\r18DAF11D 10 09 62 22 01 A0 A1 A2\r18DAF11D 21 A3 A4 A5 EE EE EE EE\r>"
+        let response = try XCTUnwrap(ELMResponseParser.parse(reply, for: request).first)
+        XCTAssertEqual(response.responder.hexIdentifier, "18DAF11D")
+        XCTAssertEqual(response.outcome, .manufacturerData([0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5]))
+
+        let target = CANResponder(identifier: 0x18DAF11D, width: .extended29Bit)
+        let other = CANResponder(identifier: 0x18DAF111, width: .extended29Bit)
+        let standard = CANResponder(identifier: 0x7E8, width: .standard11Bit)
+        let invalidReplies: [(String, ELMResponseError)] = [
+            ("18DAF11D 04 62 22 00 A0", .unexpectedResponse(responder: target)),
+            ("18DAF11D 04 61 22 01 A0", .unexpectedResponse(responder: target)),
+            ("18DAF11D 03 62 22 01", .invalidManufacturerData(responder: target)),
+            ("18DAF111 04 62 22 01 A0", .unexpectedResponder(expected: "18DAF11D", received: other)),
+            ("7E8 04 62 22 01 A0", .unexpectedResponder(expected: "18DAF11D", received: standard))
+        ]
+        for (invalid, expected) in invalidReplies {
+            XCTAssertThrowsError(try ELMResponseParser.parse(invalid, for: request)) {
+                XCTAssertEqual($0 as? ELMResponseError, expected, invalid)
+            }
+        }
+        XCTAssertEqual(try ELMResponseParser.parse("18DAF11D 03 7F 22 31", for: request).first?.outcome,
+                       .negativeResponse(code: 0x31))
     }
 
     func testRejectsAdapterStatusAndAmbiguousFrames() throws {

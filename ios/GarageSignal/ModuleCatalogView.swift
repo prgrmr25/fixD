@@ -198,14 +198,24 @@ private struct ModuleDetailsView: View {
                         Text(vehicle.responders.isEmpty ? "Awaiting standard OBD-II data" : "Standard OBD-II responses received")
                             .font(.subheadline.weight(.semibold))
                     }
-                    Text("Vehicle support unverified")
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(GarageTheme.warning)
-                    Text(isEngine
-                         ? "ECU labels identify standard OBD-II responders. The factory PCM identity is unverified."
-                         : "\(module.name) identification and diagnostics require a verified module-specific response.")
-                        .font(.caption)
-                        .foregroundStyle(GarageTheme.mutedText)
+                    if module.probe == .transmission,
+                       bridge.moduleProbeResult[.transmission]?.transmission != nil {
+                        Text(vehicle.isAdapterConnected ? "Transmission responded" : "Last transmission response")
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(GarageTheme.accent)
+                        Text("The response matches the Honda automatic transmission family. Vehicle-specific live data fields still need validation.")
+                            .font(.caption)
+                            .foregroundStyle(GarageTheme.mutedText)
+                    } else {
+                        Text("Vehicle support unverified")
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(GarageTheme.warning)
+                        Text(isEngine
+                             ? "ECU labels identify standard OBD-II responders. The factory PCM identity is unverified."
+                             : "\(module.name) identification and diagnostics require a verified module-specific response.")
+                            .font(.caption)
+                            .foregroundStyle(GarageTheme.mutedText)
+                    }
                 }
             }
 
@@ -268,13 +278,13 @@ private struct ModuleDetailsView: View {
                         LabeledContent("Responder", value: result.responder)
                         LabeledContent("Data identifier", value: result.did)
                         LabeledContent("Data bytes", value: result.byteCount.formatted())
-                        DisclosureGroup("Raw response") {
-                            Text(verbatim: result.rawHex)
-                                .font(.caption.monospaced())
-                                .fixedSize(horizontal: false, vertical: true)
-                                .textSelection(.enabled)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .padding(.top, 4)
+                        if let transmission = result.transmission {
+                            LabeledContent("Distinction code", value: transmission.distinctionCode)
+                            LabeledContent("Data list 2201", value: transmission.dataStatus)
+                        }
+                        rawResponse("Raw response", hex: result.rawHex)
+                        if let rawHex = result.transmission?.rawHex {
+                            rawResponse("Data list 2201 raw response", hex: rawHex)
                         }
                     }
                     .font(.subheadline)
@@ -289,6 +299,17 @@ private struct ModuleDetailsView: View {
                     .accessibilityIdentifier("share-module-scan")
                 }
             }
+        }
+    }
+
+    private func rawResponse(_ title: String, hex: String) -> some View {
+        DisclosureGroup(title) {
+            Text(verbatim: hex)
+                .font(.caption.monospaced())
+                .fixedSize(horizontal: false, vertical: true)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.top, 4)
         }
     }
 

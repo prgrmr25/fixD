@@ -484,7 +484,11 @@ final class BluetoothBridge: NSObject, ObservableObject {
                 switch outcome {
                 case .response(let result):
                     moduleProbeResult[probe] = result
-                    message = "The expected CAN address returned data. The module identity and data fields still need verification."
+                    if result.transmission != nil {
+                        message = "The expected ECU returned the Honda automatic transmission identification record."
+                    } else {
+                        message = "The expected CAN address returned data. The module identity and data fields still need verification."
+                    }
                 case .noResponse(let control):
                     switch control {
                     case .matched?:
