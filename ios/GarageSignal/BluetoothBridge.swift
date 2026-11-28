@@ -1,5 +1,6 @@
 import CoreBluetooth
 import DiagnosticsCore
+import Dispatch
 import Foundation
 import SwiftUI
 
@@ -545,7 +546,6 @@ final class BluetoothBridge: NSObject, ObservableObject {
     }
 
     private func poll(using session: FIXDLiveSession, connection: FIXDReadScan.Connection) async throws -> String {
-        let clock = ContinuousClock()
         var schedule = FIXDReadScan.liveSchedule(connection: connection)
         var latestByPID: [CurrentDataPID: FIXDReadScan.CurrentDataSample] = [:]
         var emptySweeps = 0
@@ -554,7 +554,7 @@ final class BluetoothBridge: NSObject, ObservableObject {
         while !isStopRequested {
             let pids = schedule.next()
             guard !pids.isEmpty else { return "The vehicle advertised no supported live signals." }
-            let started = clock.now
+            let started = DispatchTime.now().uptimeNanoseconds
             let frame = try await FIXDReadScan.readCurrentData(
                 using: session,
                 connection: connection,
@@ -586,9 +586,10 @@ final class BluetoothBridge: NSObject, ObservableObject {
                 emptySweeps = 0
             }
 
-            let delay = LivePollingSchedule.delay(after: started.duration(to: clock.now))
-            if delay > .zero {
-                try await Task.sleep(for: delay)
+            let elapsed = DispatchTime.now().uptimeNanoseconds - started
+            let delay = LivePollingSchedule.delayNanoseconds(after: elapsed)
+            if delay > 0 {
+                try await Task.sleep(nanoseconds: delay)
             }
         }
         return "Live readings stopped."

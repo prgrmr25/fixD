@@ -36,9 +36,9 @@ final class LivePollingScheduleTests: XCTestCase {
     }
 
     func testDelayUsesOnlyTheRemainderOfTheHalfSecondSweepInterval() {
-        XCTAssertEqual(LivePollingSchedule.delay(after: .zero), .milliseconds(500))
-        XCTAssertEqual(LivePollingSchedule.delay(after: .milliseconds(120)), .milliseconds(380))
-        XCTAssertEqual(LivePollingSchedule.delay(after: .milliseconds(500)), .zero)
-        XCTAssertEqual(LivePollingSchedule.delay(after: .milliseconds(830)), .zero)
+        XCTAssertEqual(LivePollingSchedule.delayNanoseconds(after: 0), 500_000_000)
+        XCTAssertEqual(LivePollingSchedule.delayNanoseconds(after: 120_000_000), 380_000_000)
+        XCTAssertEqual(LivePollingSchedule.delayNanoseconds(after: 500_000_000), 0)
+        XCTAssertEqual(LivePollingSchedule.delayNanoseconds(after: 830_000_000), 0)
     }
 }

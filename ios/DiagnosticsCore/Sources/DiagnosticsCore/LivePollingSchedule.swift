@@ -22,7 +22,8 @@ public struct LivePollingSchedule: Sendable {
         return priorities + [secondary]
     }
 
-    public static func delay(after elapsed: Duration) -> Duration {
-        max(.zero, .milliseconds(500) - elapsed)
+    public static func delayNanoseconds(after elapsed: UInt64) -> UInt64 {
+        let interval: UInt64 = 500_000_000
+        return elapsed < interval ? interval - elapsed : 0
     }
 }
