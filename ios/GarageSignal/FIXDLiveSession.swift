@@ -160,7 +160,7 @@ final class FIXDLiveSession {
         guard case .ready = phase else { throw terminalFailure ?? Failure.notReady }
         switch request {
         case .hondaData, .hondaTransmissionData: throw Failure.moduleAddressRequired
-        case .currentData, .troubleCodes: break
+        case .currentData, .troubleCodes, .monitorData: break
         }
         let timeout: Duration
         if case .currentData(.supported01Through20) = request {

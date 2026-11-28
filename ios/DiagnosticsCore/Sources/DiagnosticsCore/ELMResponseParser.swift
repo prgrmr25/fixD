@@ -9,6 +9,7 @@ public enum TroubleCodeCategory: UInt8, CaseIterable, Sendable {
 /// Fixed diagnostic reads that the transport is allowed to request.
 public enum DiagnosticRequest: Equatable, Sendable {
     case currentData(CurrentDataPID)
+    case monitorData(MisfireMonitorID)
     case troubleCodes(TroubleCodeCategory)
     case hondaData(HondaModuleProbe)
     case hondaTransmissionData
@@ -16,6 +17,7 @@ public enum DiagnosticRequest: Equatable, Sendable {
     public var requestPayload: [UInt8] {
         switch self {
         case let .currentData(pid): return pid.requestPayload
+        case let .monitorData(monitor): return monitor.requestPayload
         case let .troubleCodes(category): return [category.rawValue]
         case let .hondaData(probe):
             let identifier = probe.dataIdentifier
@@ -31,7 +33,7 @@ public enum DiagnosticRequest: Equatable, Sendable {
         switch self {
         case let .hondaData(probe): return probe.responseCANID
         case .hondaTransmissionData: return HondaModuleProbe.transmission.responseCANID
-        case .currentData, .troubleCodes: return nil
+        case .currentData, .monitorData, .troubleCodes: return nil
         }
     }
 }
@@ -54,6 +56,7 @@ public struct CANResponder: Hashable, Sendable {
 
 public enum DiagnosticOutcome: Equatable, Sendable {
     case currentData(CurrentDataValue)
+    case monitorData(MisfireMonitorValue)
     case troubleCodes([String])
     /// Opaque data record. The matching service and identifier have been removed.
     case manufacturerData([UInt8])
@@ -77,6 +80,7 @@ public enum ELMResponseError: LocalizedError, Equatable {
     case unexpectedResponder(expected: String, received: CANResponder)
     case unexpectedResponse(responder: CANResponder)
     case currentData(responder: CANResponder, reason: CurrentDataDecodingError)
+    case monitorData(responder: CANResponder, reason: MisfireMonitorDecodingError)
     case invalidTroubleCodes(responder: CANResponder)
     case invalidManufacturerData(responder: CANResponder)
     case conflictingResponses(responder: CANResponder)
@@ -103,6 +107,8 @@ public enum ELMResponseError: LocalizedError, Equatable {
             return "ECU \(responder.hexIdentifier) returned a response for a different request."
         case let .currentData(responder, _):
             return "ECU \(responder.hexIdentifier) returned invalid current data for the requested PID."
+        case let .monitorData(responder, _):
+            return "ECU \(responder.hexIdentifier) returned invalid data for the requested monitor."
         case let .invalidTroubleCodes(responder):
             return "ECU \(responder.hexIdentifier) returned an invalid trouble-code list."
         case let .invalidManufacturerData(responder):
@@ -122,7 +128,11 @@ public enum ELMResponseParser {
         "FB ERROR", "RX ERROR", "<RX ERROR", "LV RESET", "ACT ALERT", "LP ALERT"
     ]
 
-    public static func parse(_ reply: String, for request: DiagnosticRequest) throws -> [DiagnosticResponse] {
+    public static func parse(
+        _ reply: String,
+        for request: DiagnosticRequest,
+        limitingToResponder responderCANID: String? = nil
+    ) throws -> [DiagnosticResponse] {
         guard reply.utf8.count <= 16_385, reply.utf8.allSatisfy({
             (0x20...0x7E).contains($0) || $0 == 0x09 || $0 == 0x0A || $0 == 0x0D
         }) else { throw ELMResponseError.malformedReply }
@@ -160,6 +170,7 @@ public enum ELMResponseParser {
                frame.responder.width != .extended29Bit || frame.responder.hexIdentifier != expectedHondaResponder {
                 throw ELMResponseError.unexpectedResponder(expected: expectedHondaResponder, received: frame.responder)
             }
+            if let responderCANID, frame.responder.hexIdentifier != responderCANID { continue }
             if seen.insert(frame.responder).inserted {
                 order.append(frame.responder)
             }
@@ -176,7 +187,10 @@ public enum ELMResponseParser {
             if order.isEmpty { throw ELMResponseError.noData }
             throw ELMResponseError.adapterStatus("NO DATA alongside CAN frames")
         }
-        guard !order.isEmpty else { throw ELMResponseError.emptyResponse }
+        guard !order.isEmpty else {
+            if responderCANID != nil { return [] }
+            throw ELMResponseError.emptyResponse
+        }
         return try order.map { responder in
             guard transfers[responder] == nil, let response = responses[responder] else {
                 throw ELMResponseError.incompleteTransport(responder: responder)
@@ -301,6 +315,12 @@ public enum ELMResponseParser {
                     outcome = .currentData(try CurrentDataDecoder.decode(payload, for: pid))
                 } catch let error as CurrentDataDecodingError {
                     throw ELMResponseError.currentData(responder: responder, reason: error)
+                }
+            case let .monitorData(monitor):
+                do {
+                    outcome = .monitorData(try MisfireMonitorDecoder.decode(payload, for: monitor))
+                } catch let error as MisfireMonitorDecodingError {
+                    throw ELMResponseError.monitorData(responder: responder, reason: error)
                 }
             case .troubleCodes:
                 guard payload.count >= 2, payload.count == 2 + Int(payload[1]) * 2 else {

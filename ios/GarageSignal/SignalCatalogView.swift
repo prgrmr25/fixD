@@ -5,6 +5,7 @@ import SwiftUI
 struct SignalCatalogView: View {
     @ObservedObject var telemetry: DemoTelemetry
     @ObservedObject var vehicle: VehicleTelemetry
+    let misfireSnapshot: FIXDMisfireSnapshot?
 
     @AppStorage("telemetry.source.v1") private var source: TelemetrySource = .vehicle
     @State private var query = ""
@@ -73,6 +74,11 @@ struct SignalCatalogView: View {
             guard let metric = signal.metric, let sample = telemetry.samples.last else { return [] }
             return [SignalValue(text: metric.display(sample[metric]), source: "Demo")]
         case .vehicle:
+            if let cylinder = signal.misfireCylinder {
+                guard let snapshot = misfireSnapshot, let count = snapshot.countsByCylinder[cylinder] else { return [] }
+                let time = snapshot.capturedAt.formatted(date: .abbreviated, time: .shortened)
+                return [.init(text: count.formatted(), source: "ECU \(snapshot.ecu) · Mode 06 · \(time)")]
+            }
             let readings: [VehicleTelemetry.Reading]
             if let vehiclePID = signal.vehiclePID {
                 readings = vehicle.readings(forPID: vehiclePID)
@@ -81,8 +87,12 @@ struct SignalCatalogView: View {
             } else {
                 return []
             }
-            return readings.map {
-                SignalValue(text: signal.display($0.value), source: "ECU \($0.ecu)")
+            let scanDate = signal.vehiclePID?.isScanOnlyMeasurement == true ? vehicle.lastScanOnlyUpdated : nil
+            let scanTime = scanDate?.formatted(date: .abbreviated, time: .shortened)
+            return readings.map { reading in
+                let ecu = "ECU \(reading.ecu)"
+                let source = scanTime.map { "\(ecu) · Scan \($0)" } ?? ecu
+                return SignalValue(text: signal.display(reading.value), source: source)
             }
         }
     }
@@ -101,6 +111,13 @@ private struct SignalRow: View {
 
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
+    private var emptyValueNote: String? {
+        guard values.isEmpty else { return nil }
+        if signal.misfireCylinder != nil { return "Read in Engine and PCM." }
+        if signal.vehiclePID?.isScanOnlyMeasurement == true { return "Read during vehicle scans." }
+        return nil
+    }
+
     var body: some View {
         let stacked = dynamicTypeSize.isAccessibilitySize
         let layout = stacked
@@ -111,7 +128,7 @@ private struct SignalRow: View {
             VStack(alignment: .leading, spacing: 3) {
                 Text(signal.title)
                     .font(.subheadline.weight(.medium))
-                if let note = signal.note {
+                if let note = signal.note ?? emptyValueNote {
                     Text(note)
                         .font(.caption)
                         .foregroundStyle(GarageTheme.mutedText)
@@ -154,6 +171,7 @@ private struct SignalDefinition: Identifiable {
     let metric: DemoMetric?
     let note: String?
     let vehiclePID: CurrentDataPID?
+    let misfireCylinder: Int?
 
     var id: String { title }
 
@@ -162,7 +180,8 @@ private struct SignalDefinition: Identifiable {
         unit: String = "",
         keywords: String = "",
         note: String? = nil,
-        vehiclePID: CurrentDataPID? = nil
+        vehiclePID: CurrentDataPID? = nil,
+        misfireCylinder: Int? = nil
     ) {
         self.title = title
         self.unit = unit
@@ -170,6 +189,7 @@ private struct SignalDefinition: Identifiable {
         metric = nil
         self.note = note
         self.vehiclePID = vehiclePID
+        self.misfireCylinder = misfireCylinder
     }
 
     init(_ metric: DemoMetric, keywords: String = "") {
@@ -179,10 +199,13 @@ private struct SignalDefinition: Identifiable {
         self.metric = metric
         note = nil
         vehiclePID = nil
+        misfireCylinder = nil
     }
 
     func display(_ value: Double) -> String {
-        metric?.display(value) ?? value.formatted(.number.precision(.fractionLength(0)))
+        if let metric { return metric.display(value) }
+        let decimalPlaces = vehiclePID == .massAirFlow ? 2 : 0
+        return value.formatted(.number.precision(.fractionLength(decimalPlaces)))
     }
 }
 
@@ -214,20 +237,26 @@ private struct SignalGroup: Identifiable {
             .init(.load),
             .init(.ignition, keywords: "spark timing advance"),
             .init("Knock correction", unit: "°", keywords: "ignition retard detonation"),
-            .init("Cylinder 1 misfire count", unit: "Count"),
-            .init("Cylinder 2 misfire count", unit: "Count"),
-            .init("Cylinder 3 misfire count", unit: "Count"),
-            .init("Cylinder 4 misfire count", unit: "Count"),
-            .init("Cylinder 5 misfire count", unit: "Count"),
-            .init("Cylinder 6 misfire count", unit: "Count"),
+            .init("Cylinder 1 misfire count", unit: "Count", misfireCylinder: 1),
+            .init("Cylinder 2 misfire count", unit: "Count", misfireCylinder: 2),
+            .init("Cylinder 3 misfire count", unit: "Count", misfireCylinder: 3),
+            .init("Cylinder 4 misfire count", unit: "Count", misfireCylinder: 4),
+            .init("Cylinder 5 misfire count", unit: "Count", misfireCylinder: 5),
+            .init("Cylinder 6 misfire count", unit: "Count", misfireCylinder: 6),
         ]),
         Self(title: "Air, fuel, and emissions", signals: [
             .init(.throttle, keywords: "TPS ETCS electronic throttle"),
             .init("Accelerator pedal position", unit: "%", keywords: "APP"),
-            .init("Intake manifold absolute pressure", unit: "kPa", keywords: "MAP vacuum"),
-            .init("Intake air temperature", unit: "°F", keywords: "IAT temp"),
-            .init("Mass air flow", unit: "g/s", keywords: "MAF airflow"),
-            .init("Barometric pressure", unit: "kPa", keywords: "BARO"),
+            .init(
+                "Intake manifold absolute pressure", unit: "kPa", keywords: "MAP vacuum",
+                vehiclePID: .intakeManifoldAbsolutePressure
+            ),
+            .init(
+                "Intake air temperature", unit: "°F", keywords: "IAT temp",
+                vehiclePID: .intakeAirTemperature
+            ),
+            .init("Mass air flow", unit: "g/s", keywords: "MAF airflow", vehiclePID: .massAirFlow),
+            .init("Barometric pressure", unit: "kPa", keywords: "BARO", vehiclePID: .barometricPressure),
             .init("Commanded equivalence ratio", unit: "Ratio", keywords: "mixture AFR lambda"),
             .init("Upstream air/fuel sensor · B1", unit: "λ", keywords: "bank 1 sensor 1 A/F lambda AFR O2"),
             .init("Upstream air/fuel sensor · B2", unit: "λ", keywords: "bank 2 sensor 1 A/F lambda AFR O2"),

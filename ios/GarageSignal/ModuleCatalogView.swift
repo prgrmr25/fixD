@@ -15,7 +15,7 @@ private struct VehicleModule: Identifiable {
             id: "pcm", name: "Engine and PCM", icon: "engine.combustion",
             detail: "3.7 L V6 · PGM-FI powertrain control",
             readings: [
-                "Factory PCM identification and calibration", "Cylinder 1–6 misfire counts",
+                "Factory PCM identification and calibration",
                 "Honda/Acura knock correction", "Manufacturer-specific DTCs",
                 "Freeze frame and monitor readiness"
             ],
@@ -225,6 +225,9 @@ private struct ModuleDetailsView: View {
 
             if isEngine {
                 engineReadings
+                section("Cylinder misfire monitor") {
+                    MisfireMonitorView(bridge: bridge, onOpenAdapter: onOpenAdapter)
+                }
                 engineTroubleCodes
             }
 

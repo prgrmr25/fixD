@@ -32,7 +32,11 @@ struct GarageSignalApp: App {
                 .tag(AppTab.dashboard)
 
                 NavigationStack {
-                    SignalCatalogView(telemetry: telemetry, vehicle: bridge.vehicle)
+                    SignalCatalogView(
+                        telemetry: telemetry,
+                        vehicle: bridge.vehicle,
+                        misfireSnapshot: bridge.misfireScanResult
+                    )
                 }
                 .tabItem { Label("Signals", systemImage: "list.bullet") }
                 .tag(AppTab.signals)

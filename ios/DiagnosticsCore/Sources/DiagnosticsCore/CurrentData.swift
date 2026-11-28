@@ -8,14 +8,25 @@ public enum CurrentDataPID: UInt8, CaseIterable, Sendable {
     case longTermFuelTrimBank1 = 0x07
     case shortTermFuelTrimBank2 = 0x08
     case longTermFuelTrimBank2 = 0x09
+    case intakeManifoldAbsolutePressure = 0x0B
     case engineSpeed = 0x0C
     case vehicleSpeed = 0x0D
     case ignitionAdvance = 0x0E
+    case intakeAirTemperature = 0x0F
+    case massAirFlow = 0x10
     case throttlePosition = 0x11
     case supported21Through40 = 0x20
+    case barometricPressure = 0x33
     case supported41Through60 = 0x40
     case controlModuleVoltage = 0x42
     case engineOilTemperature = 0x5C
+
+    /// Measurements collected in an explicit vehicle scan.
+    public static let scanOnlyMeasurements: [Self] = [
+        .intakeManifoldAbsolutePressure, .intakeAirTemperature, .massAirFlow, .barometricPressure,
+    ]
+
+    public var isScanOnlyMeasurement: Bool { Self.scanOnlyMeasurements.contains(self) }
 
     public var requestPayload: [UInt8] { [0x01, rawValue] }
 
@@ -29,7 +40,7 @@ public enum CurrentDataPID: UInt8, CaseIterable, Sendable {
     fileprivate var valueByteCount: Int {
         if isCapabilityBitmap { return 4 }
         switch self {
-        case .engineSpeed, .controlModuleVoltage: return 2
+        case .engineSpeed, .massAirFlow, .controlModuleVoltage: return 2
         default: return 1
         }
     }
@@ -37,6 +48,7 @@ public enum CurrentDataPID: UInt8, CaseIterable, Sendable {
 
 public enum DiagnosticUnit: String, Sendable {
     case celsius, percent, rpm, kilometersPerHour, degreesBeforeTopDeadCenter, volts
+    case kilopascals, gramsPerSecond
 }
 
 public enum CurrentDataValue: Equatable, Sendable {
@@ -79,17 +91,10 @@ public enum CurrentDataDecoder {
         let a = Double(payload[2])
         switch pid {
         case .supported01Through20, .supported21Through40, .supported41Through60:
-            var supported = Set<UInt8>()
-            for position in 0..<32 {
-                let mask = UInt8(0x80) >> (position % 8)
-                if payload[2 + position / 8] & mask != 0 {
-                    supported.insert(pid.rawValue + UInt8(position + 1))
-                }
-            }
-            return .supportedPIDs(supported)
+            return .supportedPIDs(SAECapabilityBitmap.decode(payload[2...], base: pid.rawValue))
         case .calculatedEngineLoad, .throttlePosition:
             return .measurement(a * 100 / 255, .percent)
-        case .coolantTemperature, .engineOilTemperature:
+        case .coolantTemperature, .intakeAirTemperature, .engineOilTemperature:
             return .measurement(a - 40, .celsius)
         case .shortTermFuelTrimBank1, .longTermFuelTrimBank1, .shortTermFuelTrimBank2, .longTermFuelTrimBank2:
             return .measurement((a - 128) * 100 / 128, .percent)
@@ -97,10 +102,27 @@ public enum CurrentDataDecoder {
             return .measurement((a * 256 + Double(payload[3])) / 4, .rpm)
         case .vehicleSpeed:
             return .measurement(a, .kilometersPerHour)
+        case .intakeManifoldAbsolutePressure, .barometricPressure:
+            return .measurement(a, .kilopascals)
+        case .massAirFlow:
+            return .measurement((a * 256 + Double(payload[3])) / 100, .gramsPerSecond)
         case .ignitionAdvance:
             return .measurement(a / 2 - 64, .degreesBeforeTopDeadCenter)
         case .controlModuleVoltage:
             return .measurement((a * 256 + Double(payload[3])) / 1000, .volts)
         }
+    }
+}
+
+enum SAECapabilityBitmap {
+    /// The first bit represents `base + 1` and the last bit advertises the next page.
+    static func decode(_ bytes: ArraySlice<UInt8>, base: UInt8) -> Set<UInt8> {
+        var supported = Set<UInt8>()
+        for (index, byte) in bytes.enumerated() {
+            for bit in 0..<8 where byte & (UInt8(0x80) >> bit) != 0 {
+                supported.insert(base + UInt8(index * 8 + bit + 1))
+            }
+        }
+        return supported
     }
 }

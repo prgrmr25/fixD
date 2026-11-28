@@ -113,6 +113,38 @@ final class CurrentDataTests: XCTestCase {
         )
     }
 
+    func testScanOnlyIntakeMeasurementsUseStandardScaling() throws {
+        let cases: [(CurrentDataPID, UInt8, [UInt8], CurrentDataValue)] = [
+            (.intakeManifoldAbsolutePressure, 0x0B, [95], .measurement(95, .kilopascals)),
+            (.intakeAirTemperature, 0x0F, [20], .measurement(-20, .celsius)),
+            (.massAirFlow, 0x10, [0x04, 0xD2], .measurement(12.34, .gramsPerSecond)),
+            (.barometricPressure, 0x33, [101], .measurement(101, .kilopascals)),
+        ]
+        XCTAssertEqual(CurrentDataPID.scanOnlyMeasurements, cases.map { $0.0 })
+        XCTAssertFalse(CurrentDataPID.engineSpeed.isScanOnlyMeasurement)
+
+        for (pid, identifier, bytes, expected) in cases {
+            XCTAssertTrue(pid.isScanOnlyMeasurement)
+            XCTAssertEqual(pid.requestPayload, [0x01, identifier])
+            XCTAssertEqual(try CurrentDataDecoder.decode([0x41, identifier] + bytes, for: pid), expected)
+        }
+
+        XCTAssertThrowsError(try CurrentDataDecoder.decode([0x41, 0x10, 0x04], for: .massAirFlow)) { error in
+            XCTAssertEqual(error as? CurrentDataDecodingError, .invalidLength(expected: 2, received: 1))
+        }
+    }
+
+    func testIntakeSignalsAreAdvertisedOnTheCorrectBitmapPages() throws {
+        XCTAssertEqual(
+            try CurrentDataDecoder.decode([0x41, 0x00, 0, 0x23, 0, 0x01], for: .supported01Through20),
+            .supportedPIDs([0x0B, 0x0F, 0x10, 0x20])
+        )
+        XCTAssertEqual(
+            try CurrentDataDecoder.decode([0x41, 0x20, 0, 0, 0x20, 0], for: .supported21Through40),
+            .supportedPIDs([0x33])
+        )
+    }
+
     func testRejectsMalformedUnmatchedAndNegativeResponses() {
         let cases: [([UInt8], CurrentDataDecodingError)] = [
             ([0x41], .malformedPayload),

@@ -24,9 +24,11 @@ final class VehicleTelemetry: ObservableObject {
     @Published private(set) var isAdapterConnected = false
     @Published private(set) var isMonitoring = false
     @Published private(set) var lastUpdated: Date?
+    @Published private(set) var lastScanOnlyUpdated: Date?
     @Published private(set) var responders: [String] = []
     @Published private(set) var troubleCodes: [FIXDScanSnapshot.TroubleCodes] = []
     @Published private var latest: [CurrentDataPID: [Reading]] = [:]
+    @Published private var scanOnlyReadings: [CurrentDataPID: [Reading]] = [:]
 
     private var recent: [Channel: [Double]] = [:]
     private let historyLimit = 60
@@ -36,7 +38,8 @@ final class VehicleTelemetry: ObservableObject {
     }
 
     func readings(forPID pid: CurrentDataPID) -> [Reading] {
-        latest[pid] ?? []
+        let readings = pid.isScanOnlyMeasurement ? scanOnlyReadings : latest
+        return readings[pid] ?? []
     }
 
     func history(for metric: DemoMetric, ecu: String) -> [Double] {
@@ -47,9 +50,11 @@ final class VehicleTelemetry: ObservableObject {
         isAdapterConnected = false
         isMonitoring = false
         lastUpdated = nil
+        lastScanOnlyUpdated = nil
         responders = []
         troubleCodes = []
         latest = [:]
+        scanOnlyReadings = [:]
         recent = [:]
     }
 
@@ -68,7 +73,7 @@ final class VehicleTelemetry: ObservableObject {
 
     func record(readings: [FIXDScanSnapshot.Reading], capturedAt: Date) {
         var channels: [CurrentDataPID: [Reading]] = [:]
-        for reading in readings {
+        for reading in readings where !reading.pid.isScanOnlyMeasurement {
             guard reading.value.isFinite else { continue }
             let value = Self.displayValue(reading.value, for: reading.pid)
             let channel = Channel(pid: reading.pid, ecu: reading.ecu)
@@ -80,6 +85,16 @@ final class VehicleTelemetry: ObservableObject {
         }
         latest = channels.mapValues { $0.sorted { $0.ecu < $1.ecu } }
         if !channels.isEmpty { lastUpdated = capturedAt }
+    }
+
+    func recordScanOnly(readings: [FIXDScanSnapshot.Reading], capturedAt: Date) {
+        var channels: [CurrentDataPID: [Reading]] = [:]
+        for reading in readings where reading.pid.isScanOnlyMeasurement && reading.value.isFinite {
+            let value = Self.displayValue(reading.value, for: reading.pid)
+            channels[reading.pid, default: []].append(Reading(ecu: reading.ecu, value: value))
+        }
+        scanOnlyReadings = channels.mapValues { $0.sorted { $0.ecu < $1.ecu } }
+        lastScanOnlyUpdated = channels.isEmpty ? nil : capturedAt
     }
 
     func recordTroubleCodes(_ groups: [FIXDScanSnapshot.TroubleCodes]) {
@@ -105,7 +120,7 @@ final class VehicleTelemetry: ObservableObject {
     private static func displayValue(_ value: Double, for pid: CurrentDataPID) -> Double {
         switch pid {
         case .vehicleSpeed: return value / 1.609344
-        case .coolantTemperature, .engineOilTemperature: return value * 9 / 5 + 32
+        case .coolantTemperature, .intakeAirTemperature, .engineOilTemperature: return value * 9 / 5 + 32
         default: return value
         }
     }

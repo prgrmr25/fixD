@@ -32,7 +32,17 @@ final class GarageSignalUITests: XCTestCase {
 
         app.tabBars.buttons["Diagnostics"].tap()
         app.buttons["2011 Acura MDX modules"].tap()
-        XCTAssertTrue(app.navigationBars["Vehicle modules"].waitForExistence(timeout: 5))
+        let moduleList = app.navigationBars["Vehicle modules"]
+        XCTAssertTrue(moduleList.waitForExistence(timeout: 5))
+        app.buttons["pcm"].tap()
+        let pcm = app.navigationBars["Engine and PCM"]
+        XCTAssertTrue(pcm.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["connect-misfire-fixd"].exists)
+        XCTAssertFalse(app.buttons["read-misfire-counts"].exists)
+        XCTAssertFalse(app.buttons["share-misfire-scan"].exists)
+        pcm.buttons.firstMatch.tap()
+        XCTAssertTrue(moduleList.waitForExistence(timeout: 5))
+
         app.buttons["shawd"].tap()
         XCTAssertTrue(app.navigationBars["SH-AWD"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["Vehicle support unverified"].exists)

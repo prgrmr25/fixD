@@ -320,9 +320,12 @@ final class BluetoothBridge: NSObject, ObservableObject {
     @Published private(set) var moduleProbeStatus: [HondaModuleProbe: String] = [:]
     @Published private(set) var moduleProbeResult: [HondaModuleProbe: HondaModuleProbeResult] = [:]
     @Published private(set) var moduleProbeReport: [HondaModuleProbe: String] = [:]
+    @Published private(set) var misfireScanStatus: String?
+    @Published private(set) var misfireScanResult: FIXDMisfireSnapshot?
+    @Published private(set) var misfireScanReport: String?
 
     private enum ScanMode: Equatable {
-        case snapshot, continuous
+        case snapshot, continuous, misfire
         case module(HondaModuleProbe)
 
         var moduleProbe: HondaModuleProbe? {
@@ -343,7 +346,7 @@ final class BluetoothBridge: NSObject, ObservableObject {
     private var disconnectMessage = "Disconnected."
     private var liveSession: FIXDLiveSession?
     private var diagnosticConnection: FIXDReadScan.Connection?
-    private var moduleTrace: [String] = []
+    private var scanTrace: [String] = []
     private var liveScanTask: Task<Void, Never>?
 
     private var isLiveScanRunning: Bool { scanMode != nil }
@@ -367,6 +370,10 @@ final class BluetoothBridge: NSObject, ObservableObject {
     func scanModule(_ probe: HondaModuleProbe) {
         guard canStartModuleProbe else { return }
         startScan(mode: .module(probe))
+    }
+
+    func scanMisfires() {
+        startScan(mode: .misfire)
     }
 
     private var candidateEndpoints: FIXDEndpoints? {
@@ -411,6 +418,8 @@ final class BluetoothBridge: NSObject, ObservableObject {
                 liveScanStatus = error.localizedDescription
                 if case .module(let probe) = mode {
                     moduleProbeStatus[probe] = error.localizedDescription
+                } else if mode == .misfire {
+                    misfireScanStatus = error.localizedDescription
                 }
                 return
             }
@@ -418,12 +427,16 @@ final class BluetoothBridge: NSObject, ObservableObject {
         }
         isStopRequested = false
         scanMode = mode
+        scanTrace = []
         if case .module(let probe) = mode {
             moduleProbeResult[probe] = nil
             moduleProbeReport[probe] = nil
-            moduleTrace = []
             diagnosticConnection = nil
             setScanStatus("Preparing a read-only module check…")
+        } else if mode == .misfire {
+            misfireScanResult = nil
+            misfireScanReport = nil
+            setScanStatus("Preparing to read cylinder misfire counts…")
         } else {
             setScanStatus("Preparing vehicle readings…")
         }
@@ -457,8 +470,11 @@ final class BluetoothBridge: NSObject, ObservableObject {
                 message = try await poll(using: session, connection: connection)
             case .snapshot:
                 liveScanStatus = "Reading supported vehicle data…"
-                let frame = try await FIXDReadScan.readCurrentData(using: session, connection: connection)
+                let frame = try await FIXDReadScan.readCurrentData(
+                    using: session, connection: connection, includeScanOnly: true
+                )
                 guard liveSession === session, !Task.isCancelled else { return }
+                vehicle.recordScanOnly(readings: frame.readings, capturedAt: frame.capturedAt)
                 publish(frame, connection: connection)
                 liveScanStatus = "Reading stored, pending, and permanent trouble codes…"
                 let codes = try await FIXDReadScan.readTroubleCodes(using: session)
@@ -466,9 +482,20 @@ final class BluetoothBridge: NSObject, ObservableObject {
                 vehicle.recordTroubleCodes(codes)
                 liveScanResult = Self.snapshot(frame, connection: connection, troubleCodes: codes)
                 message = "Read-only scan complete. You can start live readings."
+            case .misfire:
+                scanTrace.append("Protocol: " + connection.vehicleProtocol)
+                scanTrace.append("Standard responders: " + connection.responders.joined(separator: ", "))
+                setScanStatus("Reading the PCM’s supported cylinder monitors…")
+                let result = try await FIXDReadScan.readMisfires(using: session, connection: connection) { entry in
+                    guard liveSession === session, !Task.isCancelled else { return }
+                    scanTrace.append(entry)
+                }
+                guard liveSession === session, !Task.isCancelled else { return }
+                misfireScanResult = result
+                message = result.status
             case .module(let probe):
-                moduleTrace.append("Protocol: " + connection.vehicleProtocol)
-                moduleTrace.append("Standard responders before scan: " + connection.responders.joined(separator: ", "))
+                scanTrace.append("Protocol: " + connection.vehicleProtocol)
+                scanTrace.append("Standard responders before scan: " + connection.responders.joined(separator: ", "))
                 guard connection.supportsHondaModuleProbes else {
                     finishLiveScan(FIXDReadScan.Failure.unsupportedModuleProtocol.localizedDescription)
                     return
@@ -478,7 +505,7 @@ final class BluetoothBridge: NSObject, ObservableObject {
                 diagnosticConnection = nil
                 let outcome = try await FIXDReadScan.readModule(probe, using: session, connection: connection) { entry in
                     guard liveSession === session, !Task.isCancelled else { return }
-                    moduleTrace.append(entry)
+                    scanTrace.append(entry)
                 }
                 guard liveSession === session, !Task.isCancelled else { return }
                 switch outcome {
@@ -571,10 +598,26 @@ final class BluetoothBridge: NSObject, ObservableObject {
         liveScanStatus = message
         if case .module(let probe) = scanMode {
             moduleProbeStatus[probe] = message
+        } else if scanMode == .misfire {
+            misfireScanStatus = message
         }
     }
 
-    private func saveModuleReport(_ message: String) {
+    private func saveDiagnosticReport(_ message: String) {
+        if scanMode == .misfire {
+            let snapshot = misfireScanResult
+            let summary = [
+                "2011 Acura MDX · Mode 06 cylinder misfire scan",
+                "Captured: " + (snapshot?.capturedAt ?? .now).ISO8601Format(),
+                "Expected PCM: " + HondaModuleProbe.powertrain.responseCANID,
+                "Outcome: " + message,
+            ]
+            let counts = snapshot?.countsByCylinder.sorted { $0.key < $1.key }.map {
+                "Cylinder \($0.key): \($0.value)"
+            } ?? []
+            misfireScanReport = (summary + counts + scanTrace).joined(separator: "\n")
+            return
+        }
         guard let probe = scanMode?.moduleProbe else { return }
         let summary = [
             "Honda module route check",
@@ -584,12 +627,12 @@ final class BluetoothBridge: NSObject, ObservableObject {
             "Expected responder: " + probe.responseCANID,
             "Outcome: " + message,
         ]
-        moduleProbeReport[probe] = (summary + moduleTrace).joined(separator: "\n")
+        moduleProbeReport[probe] = (summary + scanTrace).joined(separator: "\n")
     }
 
     private func finishLiveScan(_ message: String) {
         setScanStatus(message)
-        saveModuleReport(message)
+        saveDiagnosticReport(message)
         liveScanTask = nil
         scanMode = nil
         isStopRequested = false
@@ -599,7 +642,7 @@ final class BluetoothBridge: NSObject, ObservableObject {
     private func resetLiveSession(_ message: String) {
         if isLiveScanRunning {
             setScanStatus("Vehicle readings stopped. " + message)
-            saveModuleReport(message)
+            saveDiagnosticReport(message)
         } else if phase == .ready {
             liveScanStatus = "Diagnostic session closed."
         }
@@ -655,7 +698,10 @@ final class BluetoothBridge: NSObject, ObservableObject {
         moduleProbeStatus.removeAll()
         moduleProbeResult.removeAll()
         moduleProbeReport.removeAll()
-        moduleTrace.removeAll()
+        misfireScanStatus = nil
+        misfireScanResult = nil
+        misfireScanReport = nil
+        scanTrace.removeAll()
         selected = peripheral
         peripheral.delegate = self
         report = DiscoveryReport(

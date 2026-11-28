@@ -34,6 +34,13 @@ struct FIXDScanSnapshot {
     let unavailableReadings: [String]
 }
 
+struct FIXDMisfireSnapshot {
+    let capturedAt: Date
+    let ecu: String
+    let countsByCylinder: [Int: UInt16]
+    let status: String
+}
+
 struct HondaTransmissionCapture {
     let distinctionCode: String
     let dataStatus: String
@@ -79,6 +86,7 @@ enum FIXDReadScan {
         case noSupportedPIDReply
         case mismatchedConnection
         case unsupportedModuleProtocol
+        case missingMDXPCMResponder
 
         var errorDescription: String? {
             switch self {
@@ -90,6 +98,8 @@ enum FIXDReadScan {
                 return "Vehicle data must be read through the adapter session that discovered it."
             case .unsupportedModuleProtocol:
                 return "Honda module scans require a 29-bit CAN connection at 500 kbit/s."
+            case .missingMDXPCMResponder:
+                return "The expected 2011 MDX PCM did not appear in the standard OBD-II replies."
             }
         }
     }
@@ -100,7 +110,7 @@ enum FIXDReadScan {
     ) async throws -> FIXDScanSnapshot {
         let connection = try await connect(using: session, progress: progress)
         progress("Reading vehicle data supported by the responding ECUs…")
-        let frame = try await readCurrentData(using: session, connection: connection)
+        let frame = try await readCurrentData(using: session, connection: connection, includeScanOnly: true)
         progress("Reading stored, pending and permanent trouble codes…")
         let codeGroups = try await readTroubleCodes(using: session)
         return FIXDScanSnapshot(
@@ -176,12 +186,14 @@ enum FIXDReadScan {
     static func readCurrentData(
         using session: FIXDLiveSession,
         connection: Connection,
+        includeScanOnly: Bool = false,
         shouldContinue: () -> Bool = { true }
     ) async throws -> CurrentDataFrame {
         guard connection.sessionID == ObjectIdentifier(session) else { throw Failure.mismatchedConnection }
         var readings: [FIXDScanSnapshot.Reading] = []
         var unavailable: [String] = []
-        for (pid, title) in measurements {
+        let requested = includeScanOnly ? measurements + scanOnlyMeasurements : measurements
+        for (pid, title) in requested {
             try Task.checkCancellation()
             guard shouldContinue() else { throw CancellationError() }
             let expected = Set(connection.supportedPIDsByECU.compactMap { ecu, supported -> String? in
@@ -210,6 +222,64 @@ enum FIXDReadScan {
         return CurrentDataFrame(capturedAt: .now, readings: readings, unavailableReadings: unavailable)
     }
 
+    /// Scan the documented 2011 MDX cylinder monitors through the standard OBD-II route.
+    static func readMisfires(
+        using session: FIXDLiveSession,
+        connection: Connection,
+        trace: (String) -> Void
+    ) async throws -> FIXDMisfireSnapshot {
+        guard connection.sessionID == ObjectIdentifier(session) else { throw Failure.mismatchedConnection }
+        guard connection.supportsHondaModuleProbes else { throw Failure.unsupportedModuleProtocol }
+        let ecu = HondaModuleProbe.powertrain.responseCANID
+        guard connection.responders.contains(ecu) else { throw Failure.missingMDXPCMResponder }
+
+        var supported: Set<UInt8> = [0]
+        for page in MisfireMonitorID.capabilityPages {
+            guard supported.contains(page.rawValue) else {
+                return .init(capturedAt: .now, ecu: ecu, countsByCylinder: [:],
+                             status: "The PCM did not advertise the cylinder misfire monitor page.")
+            }
+            let answer = try await monitorReply(page, from: ecu, using: session, trace: trace)
+            guard case .some(.monitorData(.supportedMonitors(let monitors))) = answer else {
+                return .init(capturedAt: .now, ecu: ecu, countsByCylinder: [:],
+                             status: "The PCM did not return a usable Mode 06 capability page.")
+            }
+            supported = monitors
+        }
+
+        var counts: [Int: UInt16] = [:]
+        let advertised = MisfireMonitorID.cylinders.filter { supported.contains($0.rawValue) }
+        for monitor in advertised {
+            let answer = try await monitorReply(monitor, from: ecu, using: session, trace: trace)
+            if case .some(.monitorData(.cycleMisfireCount(let count?))) = answer,
+               let cylinder = monitor.cylinderNumber {
+                counts[cylinder] = count
+            }
+        }
+        let status: String
+        if advertised.isEmpty {
+            status = "The PCM advertised no 2011 MDX cylinder misfire monitors."
+        } else if counts.isEmpty {
+            status = "The PCM advertised cylinder monitors. No drive-cycle counts were returned."
+        } else {
+            status = "Drive-cycle counts returned for \(counts.count) of 6 cylinders."
+        }
+        return .init(capturedAt: .now, ecu: ecu, countsByCylinder: counts, status: status)
+    }
+
+    private static func monitorReply(
+        _ monitor: MisfireMonitorID,
+        from ecu: String,
+        using session: FIXDLiveSession,
+        trace: (String) -> Void
+    ) async throws -> DiagnosticOutcome? {
+        try Task.checkCancellation()
+        let request = DiagnosticRequest.monitorData(monitor)
+        let reply = try await session.read(request)
+        trace(String(format: "06%02X", Int(monitor.rawValue)) + ":\n" + reply)
+        return try optionalAnswers(reply, for: request, limitingToResponder: ecu).first?.outcome
+    }
+
     /// Capture an on-demand DTC snapshot independently from live polling.
     static func readTroubleCodes(using session: FIXDLiveSession) async throws -> [FIXDScanSnapshot.TroubleCodes] {
         var codeGroups: [FIXDScanSnapshot.TroubleCodes] = []
@@ -225,7 +295,7 @@ enum FIXDReadScan {
                     return .init(id: ecu, codes: codes, unavailableReason: nil)
                 case .negativeResponse(let code):
                     return .init(id: ecu, codes: [], unavailableReason: String(format: "ECU returned 0x%02X", Int(code)))
-                case .currentData, .manufacturerData:
+                case .currentData, .manufacturerData, .monitorData:
                     return nil
                 }
             }
@@ -282,7 +352,7 @@ enum FIXDReadScan {
                     }
                 case .negativeResponse(let code):
                     status = "The ECU declined the data list read (" + String(format: "0x%02X", Int(code)) + ")."
-                case .currentData, .troubleCodes:
+                case .currentData, .troubleCodes, .monitorData:
                     status = "The response did not match the transmission data list."
                 }
             } else {
@@ -296,10 +366,11 @@ enum FIXDReadScan {
 
     private static func optionalAnswers(
         _ reply: String,
-        for request: DiagnosticRequest
+        for request: DiagnosticRequest,
+        limitingToResponder ecu: String? = nil
     ) throws -> [DiagnosticResponse] {
         do {
-            return try ELMResponseParser.parse(reply, for: request)
+            return try ELMResponseParser.parse(reply, for: request, limitingToResponder: ecu)
         } catch ELMResponseError.noData {
             return []
         }
@@ -330,6 +401,8 @@ enum FIXDReadScan {
         case .kilometersPerHour: return "km/h"
         case .degreesBeforeTopDeadCenter: return "° BTDC"
         case .volts: return "V"
+        case .kilopascals: return "kPa"
+        case .gramsPerSecond: return "g/s"
         }
     }
 
@@ -346,6 +419,13 @@ enum FIXDReadScan {
         (.longTermFuelTrimBank2, "Long-term fuel trim, bank 2"),
         (.engineOilTemperature, "Engine oil temperature"),
         (.controlModuleVoltage, "Module voltage"),
+    ]
+
+    private static let scanOnlyMeasurements: [(CurrentDataPID, String)] = [
+        (.intakeManifoldAbsolutePressure, "Intake manifold absolute pressure"),
+        (.intakeAirTemperature, "Intake air temperature"),
+        (.massAirFlow, "Mass airflow"),
+        (.barometricPressure, "Barometric pressure")
     ]
 
     private static let codeCategories: [(TroubleCodeCategory, String)] = [
