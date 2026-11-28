@@ -50,6 +50,8 @@ final class GarageSignalUITests: XCTestCase {
         app.buttons["shawd"].tap()
         XCTAssertTrue(app.navigationBars["SH-AWD"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["Vehicle support unverified"].exists)
+        let routeDescription = "Acura documents a diagnostic connection on K-line (DLC pin 7). The scan below checks the CAN route."
+        XCTAssertTrue(app.staticTexts[routeDescription].exists)
         XCTAssertTrue(app.buttons["connect-module-fixd"].exists)
         XCTAssertFalse(app.buttons["scan-module"].exists)
         XCTAssertFalse(app.buttons["share-module-scan"].exists)
@@ -64,6 +66,24 @@ final class GarageSignalUITests: XCTestCase {
         XCTAssertTrue(reset.waitForExistence(timeout: 5))
         XCTAssertTrue(reset.label.contains("Unavailable"))
         XCTAssertFalse(app.buttons["PCM learned-value reset"].exists)
+    }
+
+    @MainActor
+    func testTransmissionGaugesWaitForAScan() {
+        let app = XCUIApplication()
+        app.launch()
+        app.tabBars.buttons["Diagnostics"].tap()
+        app.buttons["2011 Acura MDX modules"].tap()
+        XCTAssertTrue(app.navigationBars["Vehicle modules"].waitForExistence(timeout: 5))
+        app.buttons["transmission"].tap()
+        XCTAssertTrue(app.navigationBars["Automatic transmission"].waitForExistence(timeout: 5))
+
+        let atf = app.descendants(matching: .any).matching(identifier: "transmission-gauge-atf").firstMatch
+        for _ in 0..<4 where !atf.isHittable {
+            app.scrollViews.firstMatch.swipeUp()
+        }
+        XCTAssertTrue(atf.isHittable)
+        XCTAssertEqual(atf.value as? String, "Unavailable")
     }
 
     @MainActor

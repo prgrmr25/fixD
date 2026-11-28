@@ -4,6 +4,7 @@ import SwiftUI
 struct DashboardView: View {
     @ObservedObject var telemetry: DemoTelemetry
     @ObservedObject var vehicle: VehicleTelemetry
+    let transmissionCapture: HondaTransmissionCapture?
     let onConnect: () -> Void
     let onStop: () -> Void
 
@@ -73,6 +74,11 @@ struct DashboardView: View {
                     ForEach(metrics.dropFirst()) { metric in
                         gauge(metric)
                     }
+                }
+            }
+            if source == .vehicle, let transmissionCapture, transmissionCapture.readings != nil {
+                GaragePanel {
+                    TransmissionGaugesView(capture: transmissionCapture)
                 }
             }
         }

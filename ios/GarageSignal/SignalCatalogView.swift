@@ -6,6 +6,7 @@ struct SignalCatalogView: View {
     @ObservedObject var telemetry: DemoTelemetry
     @ObservedObject var vehicle: VehicleTelemetry
     let misfireSnapshot: FIXDMisfireSnapshot?
+    let transmissionCapture: HondaTransmissionCapture?
 
     @AppStorage("telemetry.source.v1") private var source: TelemetrySource = .vehicle
     @State private var query = ""
@@ -79,6 +80,11 @@ struct SignalCatalogView: View {
                 let time = snapshot.capturedAt.formatted(date: .abbreviated, time: .shortened)
                 return [.init(id: snapshot.ecu, text: count.formatted(), source: "ECU \(snapshot.ecu) · Mode 06 · \(time)")]
             }
+            if let gauge = signal.transmissionGauge {
+                guard let capture = transmissionCapture, let readings = capture.readings else { return [] }
+                let time = capture.capturedAt.formatted(date: .abbreviated, time: .shortened)
+                return [.init(id: gauge.id, text: gauge.display(readings), source: "Honda scan · \(time)")]
+            }
             let readings: [VehicleTelemetry.Reading]
             if let vehiclePID = signal.vehiclePID {
                 readings = vehicle.readings(forPID: vehiclePID)
@@ -121,6 +127,7 @@ private struct SignalRow: View {
     private var emptyValueNote: String? {
         guard values.isEmpty else { return nil }
         if signal.misfireCylinder != nil { return "Read in Engine and PCM." }
+        if signal.transmissionGauge != nil { return "Read in Automatic transmission." }
         if signal.vehiclePID?.isScanOnlyMeasurement == true { return "Read during vehicle scans." }
         return nil
     }
@@ -179,6 +186,7 @@ private struct SignalDefinition: Identifiable {
     let note: String?
     let vehiclePID: CurrentDataPID?
     let misfireCylinder: Int?
+    let transmissionGauge: TransmissionGauge?
 
     var id: String { title }
 
@@ -188,15 +196,17 @@ private struct SignalDefinition: Identifiable {
         keywords: String = "",
         note: String? = nil,
         vehiclePID: CurrentDataPID? = nil,
-        misfireCylinder: Int? = nil
+        misfireCylinder: Int? = nil,
+        transmissionGauge: TransmissionGauge? = nil
     ) {
         self.title = title
-        self.unit = unit
+        self.unit = transmissionGauge?.unit ?? unit
         self.keywords = keywords
         metric = nil
         self.note = note
         self.vehiclePID = vehiclePID
         self.misfireCylinder = misfireCylinder
+        self.transmissionGauge = transmissionGauge
     }
 
     init(_ metric: DemoMetric, keywords: String = "") {
@@ -207,6 +217,7 @@ private struct SignalDefinition: Identifiable {
         note = nil
         vehiclePID = nil
         misfireCylinder = nil
+        transmissionGauge = nil
     }
 
     func display(_ value: Double) -> String {
@@ -285,11 +296,12 @@ private struct SignalGroup: Identifiable {
         ]),
         Self(title: "Transmission and torque converter", signals: [
             .init(.vehicleSpeed, keywords: "VSS road speed"),
-            .init("Transmission fluid temperature", unit: "°F", keywords: "ATF TFT temp"),
+            .init("Transmission fluid temperature", keywords: "ATF TFT temp", transmissionGauge: .atf),
+            .init("Transmission-reported engine speed", keywords: "TCM engine RPM", transmissionGauge: .engine),
             .init("Selected gear", unit: "Position", keywords: "shift selector"),
             .init("Current gear", unit: "Gear", keywords: "actual gear shift"),
-            .init("Transmission input shaft speed", unit: "rpm", keywords: "turbine ISS"),
-            .init("Transmission output shaft speed", unit: "rpm", keywords: "OSS"),
+            .init("Transmission input shaft speed", keywords: "turbine ISS", transmissionGauge: .input),
+            .init("Transmission output shaft speed", keywords: "OSS", transmissionGauge: .output),
             .init("Torque converter clutch command", unit: "State", keywords: "TCC lockup"),
             .init("Torque converter clutch slip", unit: "rpm", keywords: "TCC lockup slip"),
             .init("Torque converter clutch duty", unit: "%", keywords: "TCC lockup duty cycle"),

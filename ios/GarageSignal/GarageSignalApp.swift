@@ -19,11 +19,13 @@ struct GarageSignalApp: App {
 
     var body: some Scene {
         WindowGroup {
+            let transmissionCapture = bridge.moduleProbeResult[.transmission]?.transmission
             TabView(selection: $selectedTab) {
                 NavigationStack {
                     DashboardView(
                         telemetry: telemetry,
                         vehicle: bridge.vehicle,
+                        transmissionCapture: transmissionCapture,
                         onConnect: openAdapter,
                         onStop: bridge.stopVehicleReadings
                     )
@@ -35,7 +37,8 @@ struct GarageSignalApp: App {
                     SignalCatalogView(
                         telemetry: telemetry,
                         vehicle: bridge.vehicle,
-                        misfireSnapshot: bridge.misfireScanResult
+                        misfireSnapshot: bridge.misfireScanResult,
+                        transmissionCapture: transmissionCapture
                     )
                 }
                 .tabItem { Label("Signals", systemImage: "list.bullet") }

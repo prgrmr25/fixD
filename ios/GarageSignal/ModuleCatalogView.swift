@@ -26,7 +26,7 @@ private struct VehicleModule: Identifiable {
             id: "transmission", name: "Automatic transmission", icon: "gearshape.2",
             detail: "Six-speed automatic · torque converter and lock-up clutch",
             readings: [
-                "ATF temperature", "Current and commanded gear", "Mainshaft and countershaft RPM",
+                "Current and commanded gear",
                 "Torque converter clutch state", "Torque converter slip",
                 "Transmission diagnostics and calibration identification"
             ],
@@ -185,6 +185,19 @@ private struct ModuleDetailsView: View {
 
     private var isEngine: Bool { module.id == "pcm" }
 
+    private var unverifiedModuleDetail: String {
+        switch module.probe {
+        case .shawd, .absVSA, .tpms, .srs:
+            return "Acura documents a diagnostic connection on K-line (DLC pin 7). The scan below checks the CAN route."
+        case .instrumentCluster:
+            return "Acura checks the cluster through body electrical diagnostics. The scan below checks a direct CAN route."
+        case .powertrain:
+            return "ECU labels identify standard OBD-II responders. The factory PCM identity is unverified."
+        default:
+            return "\(module.name) identification and diagnostics require a verified module-specific response."
+        }
+    }
+
     var body: some View {
         GarageScreen {
             Text(module.detail)
@@ -203,16 +216,14 @@ private struct ModuleDetailsView: View {
                         Text(vehicle.isAdapterConnected ? "Transmission responded" : "Last transmission response")
                             .font(.subheadline.weight(.semibold))
                             .foregroundStyle(GarageTheme.accent)
-                        Text("The response matches the Honda automatic transmission family. Vehicle-specific live data fields still need validation.")
+                        Text("The response matches the Honda automatic transmission family.")
                             .font(.caption)
                             .foregroundStyle(GarageTheme.mutedText)
                     } else {
                         Text("Vehicle support unverified")
                             .font(.subheadline.weight(.semibold))
                             .foregroundStyle(GarageTheme.warning)
-                        Text(isEngine
-                             ? "ECU labels identify standard OBD-II responders. The factory PCM identity is unverified."
-                             : "\(module.name) identification and diagnostics require a verified module-specific response.")
+                        Text(unverifiedModuleDetail)
                             .font(.caption)
                             .foregroundStyle(GarageTheme.mutedText)
                     }
@@ -242,7 +253,8 @@ private struct ModuleDetailsView: View {
     }
 
     private func moduleScan(_ probe: HondaModuleProbe) -> some View {
-        section("\(probe.title) · read-only scan") {
+        let scanButtonTitle = probe == .powertrain || probe == .transmission ? "Scan module" : "Scan CAN candidate"
+        return section("\(probe.title) · read-only scan") {
             VStack(alignment: .leading, spacing: 12) {
                 Text("Compares replies to targeted read-only requests and keeps a shareable report even if the adapter returns no data. Module identity and condition require separate verification.")
                     .font(.subheadline)
@@ -252,7 +264,7 @@ private struct ModuleDetailsView: View {
                     .foregroundStyle(GarageTheme.mutedText)
 
                 if vehicle.isAdapterConnected {
-                    Button("Scan module", systemImage: "magnifyingglass") {
+                    Button(scanButtonTitle, systemImage: "magnifyingglass") {
                         bridge.scanModule(probe)
                     }
                     .buttonStyle(.borderedProminent)
@@ -273,6 +285,11 @@ private struct ModuleDetailsView: View {
                     Text("Stop live readings before scanning this module.")
                         .font(.caption)
                         .foregroundStyle(GarageTheme.mutedText)
+                }
+
+                if probe == .transmission {
+                    Divider()
+                    TransmissionGaugesView(capture: bridge.moduleProbeResult[probe]?.transmission)
                 }
 
                 if let result = bridge.moduleProbeResult[probe] {

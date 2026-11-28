@@ -46,6 +46,8 @@ struct HondaTransmissionCapture {
     let distinctionCode: String
     let dataStatus: String
     let rawHex: String?
+    let readings: HondaTransmissionReadings?
+    let capturedAt: Date
 }
 
 struct HondaModuleProbeResult {
@@ -350,12 +352,17 @@ enum FIXDReadScan {
             checkDirectedOBD: connection.responders.contains(probe.responseCANID),
             trace: trace
         )
+        let capturedAt = Date.now
         let control = reply.directedControl.map { probe.standardControlStatus(reply: $0) }
         let answers = try optionalAnswers(reply.hondaReply, for: .hondaData(probe))
         guard let answer = answers.first else { return .noResponse(control) }
         if case .manufacturerData(let payload) = answer.outcome {
             let transmission = probe == .transmission
-                ? transmissionCapture(identityReply: reply.hondaReply, dataReply: reply.transmissionDataReply)
+                ? transmissionCapture(
+                    identityReply: reply.hondaReply,
+                    dataReply: reply.transmissionDataReply,
+                    capturedAt: capturedAt
+                )
                 : nil
             return .response(.init(probe: probe, responder: answer.responder.hexIdentifier,
                                    payload: payload, transmission: transmission))
@@ -366,19 +373,27 @@ enum FIXDReadScan {
         return .noResponse(control)
     }
 
-    private static func transmissionCapture(identityReply: String, dataReply: String?) -> HondaTransmissionCapture? {
+    private static func transmissionCapture(
+        identityReply: String,
+        dataReply: String?,
+        capturedAt: Date
+    ) -> HondaTransmissionCapture? {
         guard let identification = HondaAutomaticTransmission.identification(reply: identityReply) else { return nil }
         let distinctionCode = String(format: "0x%02X", Int(identification.distinctionCode))
 
         let status: String
         var rawHex: String?
+        var readings: HondaTransmissionReadings?
         do {
             if let dataReply, let answer = try optionalAnswers(dataReply, for: .hondaTransmissionData).first {
                 switch answer.outcome {
                 case .manufacturerData(let bytes):
                     if bytes.count == 36 {
                         rawHex = bytes.map { String(format: "%02X", Int($0)) }.joined(separator: " ")
-                        status = "Data list returned 36 bytes. Field values need vehicle validation."
+                        readings = HondaTransmissionReadings.decode(body: bytes)
+                        status = readings == nil
+                            ? "The 36-byte transmission data list could not be decoded."
+                            : "The transmission returned a snapshot of ATF temperature and shaft speeds."
                     } else {
                         status = "The data list returned a different length from the reference layout."
                     }
@@ -393,7 +408,13 @@ enum FIXDReadScan {
         } catch {
             status = error.localizedDescription
         }
-        return HondaTransmissionCapture(distinctionCode: distinctionCode, dataStatus: status, rawHex: rawHex)
+        return HondaTransmissionCapture(
+            distinctionCode: distinctionCode,
+            dataStatus: status,
+            rawHex: rawHex,
+            readings: readings,
+            capturedAt: capturedAt
+        )
     }
 
     private static func optionalAnswers(
