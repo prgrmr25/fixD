@@ -12,6 +12,7 @@ final class VehicleTelemetry: ObservableObject {
     struct Reading: Identifiable {
         let ecu: String
         let value: Double
+        let capturedAt: Date
 
         var id: String { ecu }
     }
@@ -71,19 +72,30 @@ final class VehicleTelemetry: ObservableObject {
         isMonitoring = active
     }
 
-    func record(readings: [FIXDScanSnapshot.Reading], capturedAt: Date) {
+    func record(
+        readings: [FIXDScanSnapshot.Reading],
+        capturedAt: Date,
+        replacing pid: CurrentDataPID? = nil
+    ) {
         var channels: [CurrentDataPID: [Reading]] = [:]
         for reading in readings where !reading.pid.isScanOnlyMeasurement {
             guard reading.value.isFinite else { continue }
             let value = Self.displayValue(reading.value, for: reading.pid)
             let channel = Channel(pid: reading.pid, ecu: reading.ecu)
-            channels[reading.pid, default: []].append(Reading(ecu: reading.ecu, value: value))
+            channels[reading.pid, default: []].append(
+                Reading(ecu: reading.ecu, value: value, capturedAt: reading.capturedAt)
+            )
             recent[channel, default: []].append(value)
             if let count = recent[channel]?.count, count > historyLimit {
                 recent[channel]?.removeFirst(count - historyLimit)
             }
         }
-        latest = channels.mapValues { $0.sorted { $0.ecu < $1.ecu } }
+        let ordered = channels.mapValues { $0.sorted { $0.ecu < $1.ecu } }
+        if let pid {
+            if ordered[pid] != nil || latest[pid] != nil { latest[pid] = ordered[pid] }
+        } else {
+            latest = ordered
+        }
         if !channels.isEmpty { lastUpdated = capturedAt }
     }
 
@@ -91,7 +103,9 @@ final class VehicleTelemetry: ObservableObject {
         var channels: [CurrentDataPID: [Reading]] = [:]
         for reading in readings where reading.pid.isScanOnlyMeasurement && reading.value.isFinite {
             let value = Self.displayValue(reading.value, for: reading.pid)
-            channels[reading.pid, default: []].append(Reading(ecu: reading.ecu, value: value))
+            channels[reading.pid, default: []].append(
+                Reading(ecu: reading.ecu, value: value, capturedAt: reading.capturedAt)
+            )
         }
         scanOnlyReadings = channels.mapValues { $0.sorted { $0.ecu < $1.ecu } }
         lastScanOnlyUpdated = channels.isEmpty ? nil : capturedAt

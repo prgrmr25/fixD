@@ -33,7 +33,8 @@ struct FIXDScanResultView: View {
                 } label: {
                     VStack(alignment: .leading, spacing: 3) {
                         Text(sample.title)
-                        Text("ECU " + sample.ecu)
+                        let time = sample.capturedAt.formatted(date: .omitted, time: .standard)
+                        Text("ECU \(sample.ecu) · \(time)")
                             .font(.caption.monospaced())
                             .foregroundStyle(.secondary)
                     }
@@ -85,7 +86,8 @@ private extension FIXDScanSnapshot {
         ]
         for reading in readings {
             let value = reading.value.formatted(.number.precision(.fractionLength(0...2)))
-            lines.append("ECU \(reading.ecu) · \(reading.title): \(value) \(reading.unit)")
+            let time = reading.capturedAt.ISO8601Format()
+            lines.append("ECU \(reading.ecu) · \(reading.title): \(value) \(reading.unit) · \(time)")
         }
         for group in troubleCodes {
             lines.append(group.title)

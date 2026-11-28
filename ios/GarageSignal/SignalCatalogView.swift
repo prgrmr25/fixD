@@ -72,12 +72,12 @@ struct SignalCatalogView: View {
         switch source {
         case .demo:
             guard let metric = signal.metric, let sample = telemetry.samples.last else { return [] }
-            return [SignalValue(text: metric.display(sample[metric]), source: "Demo")]
+            return [SignalValue(id: "demo", text: metric.display(sample[metric]), source: "Demo")]
         case .vehicle:
             if let cylinder = signal.misfireCylinder {
                 guard let snapshot = misfireSnapshot, let count = snapshot.countsByCylinder[cylinder] else { return [] }
                 let time = snapshot.capturedAt.formatted(date: .abbreviated, time: .shortened)
-                return [.init(text: count.formatted(), source: "ECU \(snapshot.ecu) · Mode 06 · \(time)")]
+                return [.init(id: snapshot.ecu, text: count.formatted(), source: "ECU \(snapshot.ecu) · Mode 06 · \(time)")]
             }
             let readings: [VehicleTelemetry.Reading]
             if let vehiclePID = signal.vehiclePID {
@@ -91,18 +91,25 @@ struct SignalCatalogView: View {
             let scanTime = scanDate?.formatted(date: .abbreviated, time: .shortened)
             return readings.map { reading in
                 let ecu = "ECU \(reading.ecu)"
-                let source = scanTime.map { "\(ecu) · Scan \($0)" } ?? ecu
-                return SignalValue(text: signal.display(reading.value), source: source)
+                let source: String
+                if let scanTime {
+                    source = "\(ecu) · Scan \(scanTime)"
+                } else if vehicle.isMonitoring {
+                    let time = reading.capturedAt.formatted(date: .omitted, time: .standard)
+                    source = "\(ecu) · \(time)"
+                } else {
+                    source = ecu
+                }
+                return SignalValue(id: reading.ecu, text: signal.display(reading.value), source: source)
             }
         }
     }
 }
 
 private struct SignalValue: Identifiable {
+    let id: String
     let text: String
     let source: String
-
-    var id: String { source }
 }
 
 private struct SignalRow: View {

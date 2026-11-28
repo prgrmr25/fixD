@@ -545,31 +545,51 @@ final class BluetoothBridge: NSObject, ObservableObject {
     }
 
     private func poll(using session: FIXDLiveSession, connection: FIXDReadScan.Connection) async throws -> String {
-        var emptyFrames = 0
+        let clock = ContinuousClock()
+        var schedule = FIXDReadScan.liveSchedule(connection: connection)
+        var latestByPID: [CurrentDataPID: FIXDReadScan.CurrentDataSample] = [:]
+        var emptySweeps = 0
+        liveScanStatus = "Reading supported vehicle data…"
+
         while !isStopRequested {
-            if emptyFrames > 0 {
-                liveScanStatus = "Waiting for live vehicle replies…"
-            } else if !vehicle.isMonitoring {
-                liveScanStatus = "Reading supported vehicle data…"
-            }
-            let frame = try await FIXDReadScan.readCurrentData(using: session, connection: connection) {
-                !isStopRequested
-            }
+            let pids = schedule.next()
+            guard !pids.isEmpty else { return "The vehicle advertised no supported live signals." }
+            let started = clock.now
+            let frame = try await FIXDReadScan.readCurrentData(
+                using: session,
+                connection: connection,
+                livePIDs: pids,
+                onSample: { sample in
+                    guard liveSession === session, !Task.isCancelled, !isStopRequested else { return }
+                    latestByPID[sample.pid] = sample
+                    vehicle.record(readings: sample.readings, capturedAt: sample.capturedAt, replacing: sample.pid)
+                    if !sample.readings.isEmpty && !vehicle.isMonitoring {
+                        vehicle.setMonitoring(true)
+                        liveScanStatus = "Live readings active in Dashboard and Signals."
+                    }
+                },
+                shouldContinue: { liveSession === session && !isStopRequested }
+            )
             guard liveSession === session, !Task.isCancelled, !isStopRequested else { break }
 
+            let latest = latestByPID.values.sorted { $0.pid.rawValue < $1.pid.rawValue }
+            let combined = FIXDReadScan.CurrentDataFrame(capturedAt: frame.capturedAt, samples: latest)
+            liveScanResult = Self.snapshot(combined, connection: connection, troubleCodes: [])
             if frame.readings.isEmpty {
-                emptyFrames += 1
+                emptySweeps += 1
                 vehicle.setMonitoring(false)
-                if emptyFrames == 3 {
-                    return "The vehicle returned no live values after three attempts."
+                liveScanStatus = "Waiting for live vehicle replies…"
+                if emptySweeps >= schedule.emptySweepLimit {
+                    return "The vehicle returned no live values during repeated reads."
                 }
             } else {
-                emptyFrames = 0
-                publish(frame, connection: connection)
-                vehicle.setMonitoring(true)
-                liveScanStatus = "Live readings active in Dashboard and Signals."
+                emptySweeps = 0
             }
-            try await Task.sleep(for: .seconds(2))
+
+            let delay = LivePollingSchedule.delay(after: started.duration(to: clock.now))
+            if delay > .zero {
+                try await Task.sleep(for: delay)
+            }
         }
         return "Live readings stopped."
     }

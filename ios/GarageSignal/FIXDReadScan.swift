@@ -8,6 +8,7 @@ struct FIXDScanSnapshot {
         let title: String
         let value: Double
         let unit: String
+        let capturedAt: Date
 
         var id: String { ecu + ":" + String(pid.rawValue) }
     }
@@ -69,10 +70,19 @@ enum FIXDReadScan {
         var responders: [String] { supportedPIDsByECU.keys.sorted() }
     }
 
-    struct CurrentDataFrame {
+    struct CurrentDataSample {
+        let pid: CurrentDataPID
         let capturedAt: Date
         let readings: [FIXDScanSnapshot.Reading]
         let unavailableReadings: [String]
+    }
+
+    struct CurrentDataFrame {
+        let capturedAt: Date
+        let samples: [CurrentDataSample]
+
+        var readings: [FIXDScanSnapshot.Reading] { samples.flatMap(\.readings) }
+        var unavailableReadings: [String] { samples.flatMap(\.unavailableReadings) }
     }
 
     enum ModuleOutcome {
@@ -182,44 +192,66 @@ enum FIXDReadScan {
         )
     }
 
-    /// Request a new set of readings without repeating adapter setup or reading DTCs.
+    static func liveSchedule(connection: Connection) -> LivePollingSchedule {
+        let supported = measurements.map { $0.0 }.filter { pid in
+            connection.supportedPIDsByECU.values.contains { $0.contains(pid.rawValue) }
+        }
+        return LivePollingSchedule(available: supported)
+    }
+
+    /// Request supported measurements serially. Each complete PID can publish immediately.
     static func readCurrentData(
         using session: FIXDLiveSession,
         connection: Connection,
         includeScanOnly: Bool = false,
+        livePIDs: [CurrentDataPID]? = nil,
+        onSample: ((CurrentDataSample) -> Void)? = nil,
         shouldContinue: () -> Bool = { true }
     ) async throws -> CurrentDataFrame {
         guard connection.sessionID == ObjectIdentifier(session) else { throw Failure.mismatchedConnection }
-        var readings: [FIXDScanSnapshot.Reading] = []
-        var unavailable: [String] = []
-        let requested = includeScanOnly ? measurements + scanOnlyMeasurements : measurements
+        var samples: [CurrentDataSample] = []
+        let requested = livePIDs.map { ids in
+            ids.compactMap { id in measurements.first { $0.0 == id } }
+        } ?? (includeScanOnly ? measurements + scanOnlyMeasurements : measurements)
         for (pid, title) in requested {
             try Task.checkCancellation()
             guard shouldContinue() else { throw CancellationError() }
             let expected = Set(connection.supportedPIDsByECU.compactMap { ecu, supported -> String? in
                 supported.contains(pid.rawValue) ? ecu : nil
             })
-            guard !expected.isEmpty else {
-                unavailable.append(title)
-                continue
-            }
-
-            let request = DiagnosticRequest.currentData(pid)
-            let response = try await session.read(request)
-            var observed = Set<String>()
-            for answer in try optionalAnswers(response, for: request) {
-                let ecu = answer.responder.hexIdentifier
-                guard expected.contains(ecu),
-                      case .currentData(.measurement(let value, let unit)) = answer.outcome
-                else { continue }
-                readings.append(.init(ecu: ecu, pid: pid, title: title, value: value, unit: unitName(unit)))
-                observed.insert(ecu)
-            }
-            unavailable.append(contentsOf: expected.subtracting(observed).sorted().map {
-                "\(title) · ECU \($0)"
-            })
+            let sample = try await readCurrentPID(pid, title: title, expected: expected, using: session)
+            try Task.checkCancellation()
+            guard shouldContinue() else { throw CancellationError() }
+            samples.append(sample)
+            onSample?(sample)
         }
-        return CurrentDataFrame(capturedAt: .now, readings: readings, unavailableReadings: unavailable)
+        return CurrentDataFrame(capturedAt: .now, samples: samples)
+    }
+
+    private static func readCurrentPID(
+        _ pid: CurrentDataPID,
+        title: String,
+        expected: Set<String>,
+        using session: FIXDLiveSession
+    ) async throws -> CurrentDataSample {
+        guard !expected.isEmpty else {
+            return .init(pid: pid, capturedAt: .now, readings: [], unavailableReadings: [title])
+        }
+
+        let request = DiagnosticRequest.currentData(pid)
+        let response = try await session.read(request)
+        let capturedAt = Date.now
+        var readings: [FIXDScanSnapshot.Reading] = []
+        for answer in try optionalAnswers(response, for: request) {
+            let ecu = answer.responder.hexIdentifier
+            guard expected.contains(ecu),
+                  case .currentData(.measurement(let value, let unit)) = answer.outcome
+            else { continue }
+            readings.append(.init(ecu: ecu, pid: pid, title: title, value: value,
+                                  unit: unitName(unit), capturedAt: capturedAt))
+        }
+        let unavailable = expected.subtracting(readings.map(\.ecu)).sorted().map { "\(title) · ECU \($0)" }
+        return .init(pid: pid, capturedAt: capturedAt, readings: readings, unavailableReadings: unavailable)
     }
 
     /// Scan the documented 2011 MDX cylinder monitors through the standard OBD-II route.

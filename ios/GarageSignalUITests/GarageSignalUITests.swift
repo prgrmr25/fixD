@@ -37,7 +37,11 @@ final class GarageSignalUITests: XCTestCase {
         app.buttons["pcm"].tap()
         let pcm = app.navigationBars["Engine and PCM"]
         XCTAssertTrue(pcm.waitForExistence(timeout: 5))
-        XCTAssertTrue(app.buttons["connect-misfire-fixd"].exists)
+        let misfireConnect = app.buttons["connect-misfire-fixd"]
+        for _ in 0..<4 where !misfireConnect.isHittable {
+            app.scrollViews.firstMatch.swipeUp()
+        }
+        XCTAssertTrue(misfireConnect.isHittable)
         XCTAssertFalse(app.buttons["read-misfire-counts"].exists)
         XCTAssertFalse(app.buttons["share-misfire-scan"].exists)
         pcm.buttons.firstMatch.tap()

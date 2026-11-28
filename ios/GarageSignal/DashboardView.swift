@@ -99,13 +99,14 @@ struct DashboardView: View {
         switch source {
         case .demo:
             let history = telemetry.samples.map { $0[metric] }
-            channels = history.last.map { [MetricChannel(ecu: nil, value: $0, history: history)] } ?? []
+            channels = history.last.map { [MetricChannel(ecu: nil, value: $0, history: history, capturedAt: nil)] } ?? []
         case .vehicle:
             channels = vehicle.readings(for: metric).map { reading in
                 MetricChannel(
                     ecu: reading.ecu,
                     value: reading.value,
-                    history: vehicle.history(for: metric, ecu: reading.ecu)
+                    history: vehicle.history(for: metric, ecu: reading.ecu),
+                    capturedAt: reading.capturedAt
                 )
             }
         }
@@ -151,7 +152,7 @@ struct VehicleTelemetryStatus: View {
             }
             if let lastUpdated {
                 let timestamp = lastUpdated.formatted(.dateTime.month(.abbreviated).day().hour().minute().second())
-                Text(isMonitoring ? "Latest reading \(timestamp)" : "Last vehicle scan \(timestamp)")
+                Text(isMonitoring ? "Latest reading \(timestamp)" : "Last vehicle reading \(timestamp)")
                     .font(.caption)
                     .foregroundStyle(GarageTheme.mutedText)
             } else {
@@ -167,6 +168,7 @@ private struct MetricChannel: Identifiable {
     let ecu: String?
     let value: Double
     let history: [Double]
+    let capturedAt: Date?
 
     var id: String { ecu ?? "demo" }
 }
@@ -207,8 +209,9 @@ private struct MetricCard: View {
                         Divider()
                     }
                     VStack(alignment: .leading, spacing: 6) {
-                        if let ecu = channel.ecu {
-                            Text("ECU \(ecu)")
+                        if let ecu = channel.ecu, let capturedAt = channel.capturedAt {
+                            let time = capturedAt.formatted(date: .omitted, time: .standard)
+                            Text("ECU \(ecu) · \(time)")
                                 .font(.caption2.monospaced())
                                 .foregroundStyle(GarageTheme.mutedText)
                         }
