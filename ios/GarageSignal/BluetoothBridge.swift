@@ -488,7 +488,7 @@ final class BluetoothBridge: NSObject, ObservableObject {
                 case .noResponse(let control):
                     switch control {
                     case .matched?:
-                        message = "The directed standard read worked. The Honda-specific read got no reply."
+                        message = "The expected ECU answered the standard check. The Honda-specific read got no reply."
                     case .otherResponder?, .noData?, .invalid?:
                         message = "The adapter did not confirm directed communication on this address. The Honda read got no reply."
                     case nil:

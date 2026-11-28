@@ -40,8 +40,10 @@ final class GarageSignalUITests: XCTestCase {
         XCTAssertFalse(app.buttons["scan-module"].exists)
         XCTAssertFalse(app.buttons["share-module-scan"].exists)
 
-        app.navigationBars["SH-AWD"].buttons.firstMatch.tap()
-        app.navigationBars["Vehicle modules"].buttons.firstMatch.tap()
+        app.buttons["connect-module-fixd"].tap()
+        let inspector = app.navigationBars["Bluetooth Inspector"]
+        XCTAssertTrue(inspector.waitForExistence(timeout: 8))
+        inspector.buttons.firstMatch.tap()
         app.buttons["Honda/Acura service functions"].tap()
         XCTAssertTrue(app.navigationBars["Service Functions"].waitForExistence(timeout: 5))
         let reset = app.descendants(matching: .any).matching(identifier: "PCM learned-value reset").firstMatch

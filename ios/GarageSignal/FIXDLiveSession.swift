@@ -188,7 +188,6 @@ final class FIXDLiveSession {
             try await selectModuleSetting("ATCP18", optional: true, trace: trace)
             let header = "ATSH" + String(probe.requestCANID.suffix(6))
             try await selectModuleSetting(header, optional: false, trace: trace)
-            try await selectModuleSetting("ATCRA" + probe.responseCANID, optional: true, trace: trace)
 
             let control = DiagnosticRequest.currentData(.supported01Through20)
             var directedControl: String?
@@ -199,6 +198,8 @@ final class FIXDLiveSession {
                 }
             }
 
+            // Observe the standard control before narrowing the receive filter.
+            try await selectModuleSetting("ATCRA" + probe.responseCANID, optional: true, trace: trace)
             let request = ASCIIPromptFramer.encode(.hondaData(probe))
             let reply = try await exchange(request, timeout: .seconds(10))
             let command = String(decoding: request.dropLast(), as: UTF8.self)
