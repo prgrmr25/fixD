@@ -313,6 +313,26 @@ final class ELMResponseParserTests: XCTestCase {
                        .negativeResponse(code: 0x31))
     }
 
+    func testReportsPayloadProgressBeforeRejectingAnIncompleteHondaTransfer() {
+        let reply = """
+        18DAF111 10 39 62 26 61 A0 A1 A2
+        18DAF111 21 A3 A4 A5 A6 A7 A8 A9
+        18DAF111 22 B0 B1 B2 B3 B4 B5 B6
+        >
+        """
+        let expected = CANResponder(identifier: 0x18DAF111, width: .extended29Bit)
+        var progressCount = 0
+        XCTAssertThrowsError(try ELMResponseParser.parse(reply, for: .hondaData(.powertrain)) { responder, received, declared in
+            progressCount += 1
+            XCTAssertEqual(responder, expected)
+            XCTAssertEqual(received, 20)
+            XCTAssertEqual(declared, 57)
+        }) {
+            XCTAssertEqual($0 as? ELMResponseError, .incompleteTransport(responder: expected))
+        }
+        XCTAssertEqual(progressCount, 1)
+    }
+
     func testRejectsAdapterStatusAndAmbiguousFrames() throws {
         let cases: [(String, ELMResponseError)] = [
             ("NO DATA\r>", .noData),

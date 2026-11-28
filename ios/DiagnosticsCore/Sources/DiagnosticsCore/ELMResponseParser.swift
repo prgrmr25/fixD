@@ -128,10 +128,13 @@ public enum ELMResponseParser {
         "FB ERROR", "RX ERROR", "<RX ERROR", "LV RESET", "ACT ALERT", "LP ALERT"
     ]
 
+    /// Reports received and declared payload sizes when a valid ISO-TP transfer ends early.
+    /// Partial bytes are never returned as a diagnostic response.
     public static func parse(
         _ reply: String,
         for request: DiagnosticRequest,
-        limitingToResponder responderCANID: String? = nil
+        limitingToResponder responderCANID: String? = nil,
+        onIncompleteTransfer: (CANResponder, Int, Int) -> Void = { _, _, _ in }
     ) throws -> [DiagnosticResponse] {
         guard reply.utf8.count <= 16_385, reply.utf8.allSatisfy({
             (0x20...0x7E).contains($0) || $0 == 0x09 || $0 == 0x0A || $0 == 0x0D
@@ -192,7 +195,11 @@ public enum ELMResponseParser {
             throw ELMResponseError.emptyResponse
         }
         return try order.map { responder in
-            guard transfers[responder] == nil, let response = responses[responder] else {
+            if let transfer = transfers[responder] {
+                onIncompleteTransfer(responder, transfer.payload.count, transfer.length)
+                throw ELMResponseError.incompleteTransport(responder: responder)
+            }
+            guard let response = responses[responder] else {
                 throw ELMResponseError.incompleteTransport(responder: responder)
             }
             return response

@@ -256,7 +256,7 @@ private struct ModuleDetailsView: View {
         let scanButtonTitle = probe == .powertrain || probe == .transmission ? "Scan module" : "Scan CAN candidate"
         return section("\(probe.title) · read-only scan") {
             VStack(alignment: .leading, spacing: 12) {
-                Text("Compares replies to targeted read-only requests and keeps a shareable report even if the adapter returns no data. Module identity and condition require separate verification.")
+                Text("Requests a longer adapter receive window for targeted, read-only CAN. The shareable report includes timing and any replies.")
                     .font(.subheadline)
                     .foregroundStyle(GarageTheme.mutedText)
                 Text("Park the vehicle and turn the ignition on before scanning.")

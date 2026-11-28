@@ -204,17 +204,22 @@ final class FIXDLiveSession {
 
             // Observe the standard control before narrowing the receive filter.
             try await selectModuleSetting("ATCRA" + probe.responseCANID, optional: true, trace: trace)
+            try await configureModuleReceiveWindow(trace: trace)
             let request = DiagnosticRequest.hondaData(probe)
             var reply = try await readModuleRecord(request, label: "Honda read", trace: trace)
-            if probe == .powertrain, Self.endedEarly(reply, for: request),
-               try await configureSlowerFlowControl(for: probe, trace: trace) {
-                let candidate = try await readModuleRecord(request, label: "Paced Honda retry", trace: trace)
-                if let responses = try? ELMResponseParser.parse(candidate, for: request),
-                   let first = responses.first,
-                   case .manufacturerData = first.outcome {
-                    reply = candidate
+            if probe == .powertrain, Self.endedEarly(reply, for: request) {
+                // Change only the adapter's long-message setting for this retry.
+                // Both attempts use the same receive timer and automatic flow control.
+                if try await selectModuleSetting("ATAL", optional: true, trace: trace) {
+                    let candidate = try await readModuleRecord(request, label: "Long-message Honda retry", trace: trace)
+                    if let first = try? ELMResponseParser.parse(candidate, for: request).first,
+                       case .manufacturerData = first.outcome {
+                        reply = candidate
+                    } else {
+                        trace("The retry did not return a complete record. The original incomplete reply was retained.")
+                    }
                 } else {
-                    trace("No complete data record from the paced retry. The original incomplete reply was retained.")
+                    trace("The adapter declined long-message mode. The original incomplete reply was retained.")
                 }
             }
             var transmissionDataReply: String?
@@ -227,7 +232,7 @@ final class FIXDLiveSession {
             }
 
             try await configureAdapter(AdapterCommand.standardConfiguration)
-            trace("Adapter acknowledged standard configuration restore.")
+            trace("Adapter acknowledged standard configuration restore, including default receive timing.")
 
             let restored = try await exchange(ASCIIPromptFramer.encode(control), timeout: .seconds(10))
             trace(Self.traceLine("Functional standard 0100 after restore", reply: restored))
@@ -255,9 +260,26 @@ final class FIXDLiveSession {
 
     private func readModuleRecord(_ request: DiagnosticRequest, label: String, trace: (String) -> Void) async throws -> String {
         let bytes = ASCIIPromptFramer.encode(request)
-        let reply = try await exchange(bytes, timeout: .seconds(10))
         let command = String(decoding: bytes.dropLast(), as: UTF8.self)
+        let started = DispatchTime.now().uptimeNanoseconds
+        let reply = try await exchange(bytes, timeout: .seconds(10))
+        let milliseconds = (DispatchTime.now().uptimeNanoseconds - started) / 1_000_000
         trace(Self.traceLine(label + " " + command, reply: reply))
+        trace("\(label) \(command) completed in \(milliseconds) ms through the adapter prompt.")
+        do {
+            let responses = try ELMResponseParser.parse(reply, for: request) { responder, received, declared in
+                trace("ECU \(responder.hexIdentifier) delivered \(received) of \(declared) announced ISO-TP payload bytes.")
+            }
+            if let response = responses.first {
+                trace("ECU \(response.responder.hexIdentifier) delivered a complete \(response.payload.count)-byte ISO-TP payload.")
+            }
+        } catch ELMResponseError.noData {
+            trace("No module response frames were returned.")
+        } catch let error as ELMResponseError {
+            trace(error.localizedDescription)
+        } catch {
+            trace("The module response could not be decoded.")
+        }
         return reply
     }
 
@@ -272,16 +294,16 @@ final class FIXDLiveSession {
         }
     }
 
-    /// CTS with no block limit and 10 ms separation for the one PCM retry.
-    /// Write local adapter settings only, with manual flow control enabled last.
-    private func configureSlowerFlowControl(for probe: HondaModuleProbe, trace: (String) -> Void) async throws -> Bool {
-        for command in ["ATFCSH" + probe.requestCANID, "ATFCSD30000A", "ATFCSM1"] {
-            guard try await selectModuleSetting(command, optional: true, trace: trace) else {
-                trace("The adapter declined paced flow control. The incomplete reply was retained.")
-                return false
-            }
+    private func configureModuleReceiveWindow(trace: (String) -> Void) async throws {
+        guard try await selectModuleSetting("ATSTE8", optional: true, trace: trace) else {
+            trace("The adapter declined the longer receive window. The scan uses default timing.")
+            return
         }
-        return true
+        if try await selectModuleSetting("ATAT0", optional: true, trace: trace) {
+            trace("The adapter accepted the longer receive window (about 930 ms nominal) with adaptive timing off.")
+        } else {
+            trace("The adapter accepted the longer receive limit (about 930 ms nominal). Adaptive timing remains at its default.")
+        }
     }
 
     @discardableResult

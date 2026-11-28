@@ -539,6 +539,8 @@ final class BluetoothBridge: NSObject, ObservableObject {
                 disconnect(because: "Diagnostic transport closed. " + error.localizedDescription)
             } else if isStopRequested {
                 finishLiveScan("Live readings stopped.")
+            } else if mode.moduleProbe != nil {
+                finishLiveScan("Module scan ended. " + error.localizedDescription)
             } else {
                 finishLiveScan("Vehicle readings stopped. " + error.localizedDescription)
             }
