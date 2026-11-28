@@ -231,7 +231,7 @@ private struct ModuleDetailsView: View {
     private func moduleScan(_ probe: HondaModuleProbe) -> some View {
         section("\(probe.title) · read-only scan") {
             VStack(alignment: .leading, spacing: 12) {
-                Text("Checks for a response to a targeted read-only request. Module identity and condition require separate verification.")
+                Text("Compares replies to targeted read-only requests and keeps a shareable report even if the adapter returns no data. Module identity and condition require separate verification.")
                     .font(.subheadline)
                     .foregroundStyle(GarageTheme.mutedText)
                 Text("Park the vehicle and turn the ignition on before scanning.")
@@ -279,8 +279,10 @@ private struct ModuleDetailsView: View {
                     }
                     .font(.subheadline)
                     .accessibilityIdentifier("module-scan-result")
+                }
 
-                    ShareLink(item: result.report, subject: Text("Honda/Acura module scan report")) {
+                if let report = bridge.moduleProbeReport[probe] {
+                    ShareLink(item: report, subject: Text("Honda/Acura module scan report")) {
                         Label("Share Module Scan", systemImage: "square.and.arrow.up")
                     }
                     .buttonStyle(.bordered)

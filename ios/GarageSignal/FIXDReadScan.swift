@@ -38,24 +38,10 @@ struct HondaModuleProbeResult {
     let probe: HondaModuleProbe
     let responder: String
     let payload: [UInt8]
-    let capturedAt: Date
 
     var did: String { String(format: "%04X", Int(probe.dataIdentifier)) }
     var byteCount: Int { payload.count }
     var rawHex: String { payload.map { String(format: "%02X", Int($0)) }.joined(separator: " ") }
-
-    var report: String {
-        [
-            "Honda read-only module probe",
-            "Candidate: \(probe.title)",
-            "Captured: \(capturedAt.ISO8601Format())",
-            "Request address: \(probe.requestCANID)",
-            "Responder: \(responder)",
-            "Data identifier: \(did)",
-            "Payload (\(byteCount) bytes): \(rawHex)",
-            "Module identity and field meanings are unverified.",
-        ].joined(separator: "\n")
-    }
 }
 
 @MainActor
@@ -77,7 +63,7 @@ enum FIXDReadScan {
 
     enum ModuleOutcome {
         case response(HondaModuleProbeResult)
-        case noResponse
+        case noResponse(HondaStandardControlStatus?)
         case rejected(UInt8)
     }
 
@@ -123,6 +109,7 @@ enum FIXDReadScan {
     /// Configure the adapter once and identify the PIDs advertised by each ECU.
     static func connect(
         using session: FIXDLiveSession,
+        discoverAdditionalPIDs: Bool = true,
         progress: (String) -> Void
     ) async throws -> Connection {
         if !session.isReady {
@@ -150,7 +137,9 @@ enum FIXDReadScan {
         guard !supportByECU.isEmpty else { throw Failure.noSupportedPIDReply }
 
         // Standard continuation bits qualify the next bitmap for each ECU independently.
-        let additionalPages: [CurrentDataPID] = [.supported21Through40, .supported41Through60]
+        let additionalPages: [CurrentDataPID] = discoverAdditionalPIDs
+            ? [.supported21Through40, .supported41Through60]
+            : []
         for page in additionalPages {
             try Task.checkCancellation()
             let expected = Set(supportByECU.filter { $0.value.contains(page.rawValue) }.keys)
@@ -242,21 +231,26 @@ enum FIXDReadScan {
     static func readModule(
         _ probe: HondaModuleProbe,
         using session: FIXDLiveSession,
-        connection: Connection
+        connection: Connection,
+        trace: (String) -> Void
     ) async throws -> ModuleOutcome {
         guard connection.sessionID == ObjectIdentifier(session) else { throw Failure.mismatchedConnection }
         guard connection.supportsHondaModuleProbes else { throw Failure.unsupportedModuleProtocol }
-        let reply = try await session.readModule(probe)
-        let answers = try optionalAnswers(reply, for: .hondaData(probe))
-        guard let answer = answers.first else { return .noResponse }
+        let reply = try await session.readModule(
+            probe,
+            checkDirectedOBD: connection.responders.contains(probe.responseCANID),
+            trace: trace
+        )
+        let control = reply.directedControl.map { probe.standardControlStatus(reply: $0) }
+        let answers = try optionalAnswers(reply.hondaReply, for: .hondaData(probe))
+        guard let answer = answers.first else { return .noResponse(control) }
         if case .manufacturerData(let payload) = answer.outcome {
-            return .response(.init(probe: probe, responder: answer.responder.hexIdentifier,
-                                   payload: payload, capturedAt: .now))
+            return .response(.init(probe: probe, responder: answer.responder.hexIdentifier, payload: payload))
         }
         if case .negativeResponse(let code) = answer.outcome {
             return .rejected(code)
         }
-        return .noResponse
+        return .noResponse(control)
     }
 
     private static func optionalAnswers(

@@ -319,10 +319,16 @@ final class BluetoothBridge: NSObject, ObservableObject {
     @Published private(set) var liveScanResult: FIXDScanSnapshot?
     @Published private(set) var moduleProbeStatus: [HondaModuleProbe: String] = [:]
     @Published private(set) var moduleProbeResult: [HondaModuleProbe: HondaModuleProbeResult] = [:]
+    @Published private(set) var moduleProbeReport: [HondaModuleProbe: String] = [:]
 
     private enum ScanMode: Equatable {
         case snapshot, continuous
         case module(HondaModuleProbe)
+
+        var moduleProbe: HondaModuleProbe? {
+            if case .module(let probe) = self { return probe }
+            return nil
+        }
     }
 
     @Published private var scanMode: ScanMode?
@@ -337,6 +343,7 @@ final class BluetoothBridge: NSObject, ObservableObject {
     private var disconnectMessage = "Disconnected."
     private var liveSession: FIXDLiveSession?
     private var diagnosticConnection: FIXDReadScan.Connection?
+    private var moduleTrace: [String] = []
     private var liveScanTask: Task<Void, Never>?
 
     private var isLiveScanRunning: Bool { scanMode != nil }
@@ -413,6 +420,9 @@ final class BluetoothBridge: NSObject, ObservableObject {
         scanMode = mode
         if case .module(let probe) = mode {
             moduleProbeResult[probe] = nil
+            moduleProbeReport[probe] = nil
+            moduleTrace = []
+            diagnosticConnection = nil
             setScanStatus("Preparing a read-only module check…")
         } else {
             setScanStatus("Preparing vehicle readings…")
@@ -429,7 +439,10 @@ final class BluetoothBridge: NSObject, ObservableObject {
             if let verified = diagnosticConnection {
                 connection = verified
             } else {
-                connection = try await FIXDReadScan.connect(using: session) { message in
+                connection = try await FIXDReadScan.connect(
+                    using: session,
+                    discoverAdditionalPIDs: mode.moduleProbe == nil
+                ) { message in
                     guard liveSession === session, !Task.isCancelled, !isStopRequested else { return }
                     setScanStatus(message)
                 }
@@ -454,6 +467,8 @@ final class BluetoothBridge: NSObject, ObservableObject {
                 liveScanResult = Self.snapshot(frame, connection: connection, troubleCodes: codes)
                 message = "Read-only scan complete. You can start live readings."
             case .module(let probe):
+                moduleTrace.append("Protocol: " + connection.vehicleProtocol)
+                moduleTrace.append("Standard responders before scan: " + connection.responders.joined(separator: ", "))
                 guard connection.supportsHondaModuleProbes else {
                     finishLiveScan(FIXDReadScan.Failure.unsupportedModuleProtocol.localizedDescription)
                     return
@@ -461,14 +476,24 @@ final class BluetoothBridge: NSObject, ObservableObject {
                 setScanStatus("Waiting for the targeted module’s reply…")
                 // The module read restores adapter defaults. The next scan verifies fresh CAN settings.
                 diagnosticConnection = nil
-                let outcome = try await FIXDReadScan.readModule(probe, using: session, connection: connection)
+                let outcome = try await FIXDReadScan.readModule(probe, using: session, connection: connection) { entry in
+                    guard liveSession === session, !Task.isCancelled else { return }
+                    moduleTrace.append(entry)
+                }
                 guard liveSession === session, !Task.isCancelled else { return }
                 switch outcome {
                 case .response(let result):
                     moduleProbeResult[probe] = result
                     message = "The expected CAN address returned data. The module identity and data fields still need verification."
-                case .noResponse:
-                    message = "No reply to this read. Module support remains unverified."
+                case .noResponse(let control):
+                    switch control {
+                    case .matched?:
+                        message = "The directed standard read worked. The Honda-specific read got no reply."
+                    case .otherResponder?, .noData?, .invalid?:
+                        message = "The adapter did not confirm directed communication on this address. The Honda read got no reply."
+                    case nil:
+                        message = "The adapter reported NO DATA for this read. Module support remains unverified."
+                    }
                 case .rejected(let code):
                     message = "The addressed ECU declined the read (" + String(format: "0x%02X", Int(code)) + ")."
                 }
@@ -545,8 +570,22 @@ final class BluetoothBridge: NSObject, ObservableObject {
         }
     }
 
+    private func saveModuleReport(_ message: String) {
+        guard let probe = scanMode?.moduleProbe else { return }
+        let summary = [
+            "Honda module route check",
+            "Module candidate: " + probe.title,
+            "Captured: " + Date.now.ISO8601Format(),
+            "Directed address: " + probe.requestCANID,
+            "Expected responder: " + probe.responseCANID,
+            "Outcome: " + message,
+        ]
+        moduleProbeReport[probe] = (summary + moduleTrace).joined(separator: "\n")
+    }
+
     private func finishLiveScan(_ message: String) {
         setScanStatus(message)
+        saveModuleReport(message)
         liveScanTask = nil
         scanMode = nil
         isStopRequested = false
@@ -556,6 +595,7 @@ final class BluetoothBridge: NSObject, ObservableObject {
     private func resetLiveSession(_ message: String) {
         if isLiveScanRunning {
             setScanStatus("Vehicle readings stopped. " + message)
+            saveModuleReport(message)
         } else if phase == .ready {
             liveScanStatus = "Diagnostic session closed."
         }
@@ -610,6 +650,8 @@ final class BluetoothBridge: NSObject, ObservableObject {
         vehicle.clearForNewAdapter()
         moduleProbeStatus.removeAll()
         moduleProbeResult.removeAll()
+        moduleProbeReport.removeAll()
+        moduleTrace.removeAll()
         selected = peripheral
         peripheral.delegate = self
         report = DiscoveryReport(

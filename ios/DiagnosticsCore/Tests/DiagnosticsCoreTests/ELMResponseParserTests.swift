@@ -165,6 +165,36 @@ final class ELMResponseParserTests: XCTestCase {
         }
     }
 
+    func testHondaStandardControlClassifiesTheDirectedReply() {
+        let expected = "18DAF111 06 41 00 00 10 00 01"
+        let other = "18DAF11D 06 41 00 00 00 00 01"
+        let cases: [(String, HondaStandardControlStatus)] = [
+            ("01 00\r\(expected)\r>", .matched),
+            (other, .otherResponder),
+            ("\(expected)\r\(other)", .otherResponder),
+            ("7E8 06 41 00 00 10 00 01", .otherResponder),
+            ("18DAF111 03 7F 01 11", .invalid),
+            ("18DAF111 06 41 20 00 10 00 01", .invalid),
+            ("18DAF111 05 41 00 00 10 00", .invalid),
+            ("\(expected)\rNO DATA", .invalid),
+            ("CAN ERROR\r>", .invalid),
+            ("0100\rNO DATA\r>", .noData)
+        ]
+        for (reply, status) in cases {
+            XCTAssertEqual(HondaModuleProbe.powertrain.standardControlStatus(reply: reply), status, reply)
+        }
+        XCTAssertEqual(HondaModuleProbe.transmission.standardControlStatus(reply: other), .matched)
+    }
+
+    func testHondaFunctionalControlReportsOnlyCurrentPositiveExtendedResponders() {
+        let reply = "0100\r18DAF11D06410000000001\r7E8 06 41 00 00 10 00 01\r"
+            + "18DAF125 03 7F 01 11\r18 DA F1 11 06 41 00 00 10 00 01\r>"
+        XCTAssertEqual(HondaModuleProbe.functionalControlResponders(reply: reply), ["18DAF111", "18DAF11D"])
+        XCTAssertEqual(HondaModuleProbe.functionalControlResponders(reply: "18DAF11D06410000000001"), ["18DAF11D"])
+        XCTAssertEqual(HondaModuleProbe.functionalControlResponders(reply: "NO DATA\r>"), [])
+        XCTAssertEqual(HondaModuleProbe.functionalControlResponders(reply: "18DAF111 05 41 00 00 10 00"), [])
+    }
+
     func testHondaProbeReassemblesFragmentedPositiveReplyAsOpaqueData() throws {
         var framer = ASCIIPromptFramer()
         XCTAssertEqual(try framer.consume(Array("22 26 61\r18DAF111100B6226".utf8)), [])

@@ -1,5 +1,12 @@
 import Foundation
 
+public enum HondaStandardControlStatus: Equatable, Sendable {
+    case matched
+    case otherResponder
+    case noData
+    case invalid
+}
+
 /// Read-only Honda/Acura CAN module candidates from HDS reference data.
 /// Model and calibration support must be established on the vehicle.
 public enum HondaModuleProbe: String, CaseIterable, Sendable, Hashable {
@@ -49,4 +56,33 @@ public enum HondaModuleProbe: String, CaseIterable, Sendable, Hashable {
 
     public var requestCANID: String { String(format: "18DA%02XF1", Int(ecuAddress)) }
     public var responseCANID: String { String(format: "18DAF1%02X", Int(ecuAddress)) }
+
+    /// Classifies a completed SAE 0100 control, which must positively identify the directed target.
+    public func standardControlStatus(reply: String) -> HondaStandardControlStatus {
+        do {
+            let responders = try Self.positiveStandardControlResponders(reply: reply)
+            guard !responders.isEmpty else { return .invalid }
+            if responders.contains(where: { $0.width != .extended29Bit || $0.hexIdentifier != responseCANID }) {
+                return .otherResponder
+            }
+            return .matched
+        } catch ELMResponseError.noData {
+            return .noData
+        } catch {
+            return .invalid
+        }
+    }
+
+    /// Reports the valid extended CAN responders in one completed functional SAE 0100 reply.
+    public static func functionalControlResponders(reply: String) -> [String] {
+        guard let responders = try? positiveStandardControlResponders(reply: reply) else { return [] }
+        return responders.filter { $0.width == .extended29Bit }.map(\.hexIdentifier).sorted()
+    }
+
+    private static func positiveStandardControlResponders(reply: String) throws -> [CANResponder] {
+        try ELMResponseParser.parse(reply, for: .currentData(.supported01Through20)).compactMap { response in
+            guard case .currentData(.supportedPIDs(_)) = response.outcome else { return nil }
+            return response.responder
+        }
+    }
 }

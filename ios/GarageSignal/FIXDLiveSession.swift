@@ -168,31 +168,79 @@ final class FIXDLiveSession {
         return try await exchange(ASCIIPromptFramer.encode(request), timeout: timeout)
     }
 
-    /// Selects one allowlisted 29-bit module address, sends one read, then restores adapter defaults.
-    func readModule(_ probe: HondaModuleProbe) async throws -> String {
+    struct ModuleExchange {
+        let directedControl: String?
+        let hondaReply: String
+    }
+
+    /// Selects one allowlisted module and restores standard configuration before handing the link back.
+    func readModule(
+        _ probe: HondaModuleProbe,
+        checkDirectedOBD: Bool,
+        trace: (String) -> Void
+    ) async throws -> ModuleExchange {
         guard case .ready = phase else { throw terminalFailure ?? Failure.notReady }
         phase = .configuring
 
         do {
-            // ATZ/ATD select the default 0x18 priority. ATSH supplies the remaining three bytes.
+            // Some ELM-compatible adapters reject optional commands. The defaults
+            // still supply priority 0x18, and the parser always checks the responder.
+            try await selectModuleSetting("ATCP18", optional: true, trace: trace)
             let header = "ATSH" + String(probe.requestCANID.suffix(6))
-            let headerReply = try await exchange(Array((header + "\r").utf8), timeout: .seconds(5))
-            let status = headerReply.split(whereSeparator: \.isNewline).map {
-                $0.trimmingCharacters(in: .whitespaces).uppercased()
-            }.filter { !$0.isEmpty && $0 != header }
-            guard status == ["OK"] else { throw Failure.rejectedSetup(header) }
+            try await selectModuleSetting(header, optional: false, trace: trace)
+            try await selectModuleSetting("ATCRA" + probe.responseCANID, optional: true, trace: trace)
 
-            let reply = try await exchange(ASCIIPromptFramer.encode(.hondaData(probe)), timeout: .seconds(10))
+            let control = DiagnosticRequest.currentData(.supported01Through20)
+            var directedControl: String?
+            if checkDirectedOBD {
+                directedControl = try await exchange(ASCIIPromptFramer.encode(control), timeout: .seconds(10))
+                if let directedControl {
+                    trace(Self.traceLine("Directed standard 0100", reply: directedControl))
+                }
+            }
+
+            let request = ASCIIPromptFramer.encode(.hondaData(probe))
+            let reply = try await exchange(request, timeout: .seconds(10))
+            let command = String(decoding: request.dropLast(), as: UTF8.self)
+            trace(Self.traceLine("Honda read " + command, reply: reply))
+
             try await configureAdapter(AdapterCommand.standardConfiguration)
+            trace("Adapter acknowledged standard configuration restore.")
+
+            let restored = try await exchange(ASCIIPromptFramer.encode(control), timeout: .seconds(10))
+            trace(Self.traceLine("Functional standard 0100 after restore", reply: restored))
+            let responders = HondaModuleProbe.functionalControlResponders(reply: restored)
+            if responders.isEmpty {
+                trace("No valid standard 29-bit responders confirmed after restore.")
+            } else {
+                trace("Standard responders after restore: " + responders.joined(separator: ", "))
+            }
+
             try Task.checkCancellation()
             guard case .configuring = phase else { throw terminalFailure ?? Failure.notReady }
             phase = .ready
-            return reply
+            return ModuleExchange(directedControl: directedControl, hondaReply: reply)
         } catch {
             // A timed-out request or failed restore must not leave a usable targeted header.
             invalidate(because: error as? Failure ?? .cancelled)
             throw error
         }
+    }
+
+    private func selectModuleSetting(_ command: String, optional: Bool, trace: (String) -> Void) async throws {
+        let reply = try await exchange(Array((command + "\r").utf8), timeout: .seconds(5))
+        trace(Self.traceLine(command, reply: reply))
+        let status = reply.split(whereSeparator: \.isNewline).map {
+            $0.trimmingCharacters(in: .whitespaces).uppercased()
+        }.filter { !$0.isEmpty && $0.filter { !$0.isWhitespace } != command }
+        guard status == ["OK"] || (optional && status == ["?"]) else {
+            throw Failure.rejectedSetup(command)
+        }
+    }
+
+    private static func traceLine(_ label: String, reply: String) -> String {
+        let lines = reply.split(whereSeparator: \.isNewline)
+        return ([label + ":"] + lines.map { "  " + String($0) }).joined(separator: "\n")
     }
 
     private func configureAdapter(_ commands: [AdapterCommand]) async throws {
