@@ -167,6 +167,8 @@ struct VehicleTelemetryStatus: View {
                     .foregroundStyle(GarageTheme.mutedText)
             }
         }
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("vehicle-telemetry-status")
     }
 }
 

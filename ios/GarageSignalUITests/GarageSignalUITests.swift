@@ -142,9 +142,16 @@ final class GarageSignalUITests: XCTestCase {
 
         app.tabBars.buttons["Signals"].tap()
         XCTAssertTrue(app.navigationBars["Signals"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.staticTexts["Simulated telemetry"].waitForExistence(timeout: 5))
-        app.buttons["Vehicle"].tap()
-        XCTAssertTrue(app.staticTexts["Vehicle monitoring inactive"].waitForExistence(timeout: 5))
-        XCTAssertFalse(app.staticTexts["Simulated telemetry"].exists)
+        let demoStatus = app.staticTexts["Simulated telemetry"]
+        let vehicleStatus = app.descendants(matching: .any).matching(identifier: "vehicle-telemetry-status").firstMatch
+        XCTAssertTrue(demoStatus.waitForExistence(timeout: 5))
+        XCTAssertFalse(vehicleStatus.exists)
+
+        let sourcePicker = app.segmentedControls["telemetry-source"]
+        let vehicleOption = sourcePicker.exists ? sourcePicker.buttons["Vehicle"] : app.buttons["Vehicle"]
+        XCTAssertTrue(vehicleOption.isHittable, app.debugDescription)
+        vehicleOption.tap()
+        XCTAssertTrue(vehicleStatus.waitForExistence(timeout: 8), app.debugDescription)
+        XCTAssertFalse(demoStatus.exists, app.debugDescription)
     }
 }
